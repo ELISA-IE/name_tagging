@@ -2,6 +2,7 @@ import os
 import sys
 import argparse
 import time
+import timeit
 import operator
 import random
 import torch
@@ -170,6 +171,8 @@ parameters['crf'] = args.crf == 1
 parameters['conv'] = args.conv == 1
 parameters['dropout'] = args.dropout
 parameters['lr_method'] = args.lr_method
+parameters['num_epochs'] = args.num_epochs
+parameters['batch_size'] = args.batch_size
 # external features
 parameters['feat_dim'] = args.feat_dim
 parameters['comb_method'] = args.comb_method
@@ -235,9 +238,9 @@ train_sentences = load_sentences(args.train, lower, zeros)
 dev_sentences = load_sentences(args.dev, lower, zeros)
 test_sentences = load_sentences(args.test, lower, zeros)
 
-train_sentences = train_sentences[:]
-dev_sentences = dev_sentences[:]
-test_sentences = test_sentences[:]
+# train_sentences = train_sentences[:50]
+# dev_sentences = dev_sentences[:50]
+# test_sentences = test_sentences[:50]
 
 # Use selected tagging scheme (IOB / IOBES), also check tagging scheme
 update_tag_scheme(train_sentences, tag_scheme)
@@ -292,11 +295,6 @@ dataset['test'] = prepare_dataset(
     word_to_id, char_to_id, tag_to_id, feat_to_id_list, lower
 )
 
-# dataset['train'] = dataset['train']
-# dataset['dev'] = dataset['dev']
-# dataset['test'] = dataset['test']
-
-
 print("%i / %i / %i sentences in train / dev / test." % (
     len(dataset['train']), len(dataset['dev']), len(dataset['test'])))
 
@@ -319,16 +317,16 @@ num_epochs = args.num_epochs
 batch_size = args.batch_size
 
 for epoch in range(num_epochs):
-    print('Epoch {}/{}'.format(epoch, num_epochs - 1))
     print('-' * 10)
+    print('Epoch {}/{}'.format(epoch, num_epochs - 1))
     time_epoch_start = time.time()  # epoch start time
 
     # Each epoch has a training and validation phase
-    for phase in ['train', 'dev', 'test'][:1]:
+    for phase in ['train', 'dev', 'test'][:2]:
         if phase == 'train':
-            optimizer = exp_lr_scheduler(optimizer_ft, epoch)
+            optimizer = exp_lr_scheduler(optimizer_ft, epoch, init_lr=0.01)
             model.train(True)  # Set model to training mode
-            # random.shuffle(dataset[phase])
+            random.shuffle(dataset[phase])
         else:
             model.train(False)  # Set model to evaluate mode
 
@@ -341,13 +339,15 @@ for epoch in range(num_epochs):
             inputs, index_mapping, batch_len = create_input(dataset[phase][i:i+batch_size], parameters)
 
             # forward
-            outputs = model.forward(inputs, batch_len)
-            loss = model.loss(outputs, inputs['tags'], batch_len)
-
-            # make_dot(loss, model.parameters())
+            forward_start = timeit.default_timer()
+            outputs, loss = model.forward(inputs, batch_len)
+            forward_elapsed = timeit.default_timer() - forward_start
+            # print('forward elapsed: ', forward_elapsed)
 
             # backward + optimize only if in training phase
             if phase == 'train':
+                backward_start = timeit.default_timer()
+
                 # zero the parameter gradients
                 optimizer.zero_grad()
 
@@ -358,19 +358,25 @@ for epoch in range(num_epochs):
                 sys.stdout.write('%d instances processed. current batch loss: %f\r' % (i, loss.data[0]))
                 sys.stdout.flush()
 
-            # statistics
-            running_loss.append(loss.data[0])
+                # statistics
+                running_loss.append(loss.data[0])
 
-            _, _preds = torch.max(outputs.data, 2)
+                backward_elapsed = timeit.default_timer() - backward_start
+                # print('backward elapsed: ', backward_elapsed)
+            else:
+                if parameters['crf']:
+                    preds += [outputs[index_mapping[j]].data for j in range(len(outputs))]
+                else:
+                    _, _preds = torch.max(outputs.data, 2)
 
-            preds += [_preds[index_mapping[j]][:batch_len[index_mapping[j]]] for j in range(len(index_mapping))]
+                    preds += [_preds[index_mapping[j]][:batch_len[index_mapping[j]]] for j in range(len(index_mapping))]
 
-        epoch_loss = sum(running_loss) / len(running_loss)
-
-        epoch_f1, epoch_acc = evaluate(preds, dataset[phase], id_to_tag)
-
-        print('{} Loss: {:.4f} F1: {:.4f} Acc: {:.4f}\n'.format(
-            phase, epoch_loss, epoch_f1, epoch_acc))
+        if phase == 'train':
+            epoch_loss = sum(running_loss) / len(running_loss)
+            print('{} Loss: {:.4f}\n'.format(phase, epoch_loss))
+        else:
+            epoch_f1, epoch_acc = evaluate(preds, dataset[phase], id_to_tag)
+            print('{} F1: {:.4f} Acc: {:.4f}\n'.format(phase, epoch_f1, epoch_acc))
 
         # deep copy the model
         if phase == 'val' and epoch_f1 > best_f1:

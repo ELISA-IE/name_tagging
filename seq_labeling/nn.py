@@ -4,7 +4,9 @@ import torch.nn as nn
 import numpy as np
 import _pickle as cPickle
 from torch.autograd import Variable
+from torch.nn.parameter import Parameter
 from seq_labeling.loader import load_embedding
+from ml_utils import init_param, log_sum_exp
 
 
 class SeqLabeling(nn.Module):
@@ -13,30 +15,38 @@ class SeqLabeling(nn.Module):
                  word_dim,
                  word_lstm_dim,
                  word_bidirect,
+                 crf,
                  label_size,
                  lr_method,
                  pre_emb,
                  **kwargs
                  ):
         super(SeqLabeling, self).__init__()
+
         self.word_emb = nn.Embedding(word_vocab_size, word_dim)
 
-        self.word_lstm = nn.LSTM(word_dim, word_lstm_dim, 1, bidirectional=word_bidirect, batch_first=True)
+        self.word_lstm = nn.LSTM(word_dim, word_lstm_dim, 1,
+                                 bidirectional=word_bidirect, batch_first=True)
         if word_bidirect:
             linear_input_dim = 2 * word_lstm_dim
         else:
             linear_input_dim = word_lstm_dim
         self.linear = nn.Linear(linear_input_dim, label_size)
+
         self.softmax = nn.Softmax()
-        self.criterion = self.cross_entropy_loss
+
+        if crf:
+            self.criterion = CRFLoss(label_size)
+        else:
+            self.criterion = CrossEntropyLoss()
 
         self.init_weights()
 
     def init_weights(self):
-        initrange = 0.1
-        self.word_emb.weight.data.uniform_(-initrange, initrange)
-        self.linear.bias.data.fill_(0)
-        self.linear.weight.data.uniform_(-initrange, initrange)
+        init_param(self.word_emb)
+        init_param(self.word_lstm)
+        init_param(self.linear)
+        init_param(self.criterion)
 
     def load_pretrained(self, id_to_word, pre_emb, word_dim, **kwargs):
         if not pre_emb:
@@ -76,8 +86,8 @@ class SeqLabeling(nn.Module):
                 c_lower += 1
             elif re.sub('\d', '0', word.lower()) in pretrained:
                 new_weights[i] = torch.from_numpy(pretrained[
-                    re.sub('\d', '0', word.lower())
-                ])
+                                                      re.sub('\d', '0', word.lower())
+                                                  ])
                 c_zeros += 1
         self.word_emb.weight = nn.Parameter(new_weights)
 
@@ -92,53 +102,66 @@ class SeqLabeling(nn.Module):
                   c_found, c_lower, c_zeros
               ))
 
-    def cross_entropy_loss(self, pred, target):
-        onehot_target = torch.zeros(pred.size())
-        onehot_target[range(len(target)), target.data] = 1
-        onehot_target = Variable(onehot_target)
-
-        loss = torch.sum(- onehot_target * torch.log(pred))
-
-        return loss
-
     def forward(self, inputs, batch_len):
+        #
+        # word embeddings
+        #
         words = inputs['words']
 
-        word_emb = self.word_emb(words)
+        word_emb = self.word_emb(words.type(torch.LongTensor))
 
         word_emb = torch.nn.utils.rnn.pack_padded_sequence(word_emb, batch_len,
                                                            batch_first=True)
+
+        #
+        # bi-directional lstm
+        #
         word_lstm_out, word_lstm_h = self.word_lstm(word_emb)
         word_lstm_out, _ = torch.nn.utils.rnn.pad_packed_sequence(word_lstm_out,
                                                                   batch_first=True)
 
+        #
+        # fully connected layer
+        #
         linear_out = self.linear(word_lstm_out)
 
-        softmax_out = torch.stack([self.softmax(linear_out[i]) for i in range(len(batch_len))], 0)
+        if type(self.criterion) == CrossEntropyLoss:
+            outputs = torch.stack([self.softmax(linear_out[i]) for i in range(len(batch_len))], 0)
+        elif type(self.criterion) == CRFLoss and not self.training:
+            preds = linear_out
+            outputs = []
+            for i in range(len(batch_len)):
+                valid_output = preds[i][:batch_len[i]]
+                _output = self.criterion(valid_output, None,
+                                         viterbi=True,
+                                         return_best_sequence=True)
+                outputs.append(_output)
+        else:
+            outputs = None
 
-        return softmax_out
-
-    def loss(self, preds, reference, batch_len):
+        #
+        # compute batch loss
+        #
         loss = 0
-
         batch_len = np.array(batch_len)
-        max_length = max(batch_len)
-        for step in range(max_length):
-            if np.sum(batch_len > step) == 0:
-                break
-            mask_vector = torch.from_numpy(
-                (batch_len > step).astype(np.int32)).byte()
-            index_vector = Variable(
-                torch.masked_select(torch.arange(0, len(batch_len)),
-                                    mask_vector).long())
-            valid_output = torch.index_select(preds[:, step], 0, index_vector)
-            valid_target = torch.index_select(reference[:, step], 0,
-                                              index_vector)
+        if self.training:
+            if type(self.criterion) == CrossEntropyLoss:
+                preds = outputs
+            elif type(self.criterion) == CRFLoss:
+                preds = linear_out
+            reference = inputs['tags']
 
-            step_loss = self.criterion(valid_output, valid_target)
-            loss += step_loss
+            for i in range(len(batch_len)):
+                valid_output = preds[i][:batch_len[i]]
+                valid_target = reference[i][:batch_len[i]]
 
-        return loss / torch.sum(torch.from_numpy(batch_len))
+                step_loss = self.criterion(valid_output, valid_target)
+
+                loss += step_loss
+
+            loss = loss / torch.sum(torch.from_numpy(batch_len))
+
+        return outputs, loss
 
     def save_mappings(self, id_to_word, id_to_char, id_to_tag, id_to_feat_list):
         """
@@ -157,5 +180,98 @@ class SeqLabeling(nn.Module):
             }
             cPickle.dump(mappings, f)
 
+
+class CrossEntropyLoss(nn.Module):
+    def __init__(self):
+        super(CrossEntropyLoss, self).__init__()
+
+    def forward(self, pred, ref):
+        onehot_target = torch.zeros(pred.size())
+        onehot_target[range(len(ref)), ref.data] = 1
+        onehot_target = Variable(onehot_target, requires_grad=False)
+
+        loss = torch.sum(- onehot_target * torch.log(pred))
+
+        return loss
+
+
+class CRFLoss(nn.Module):
+    def __init__(self, num_labels):
+        super(CRFLoss, self).__init__()
+
+        self.num_labels = num_labels
+        self.transitions = Parameter(
+            torch.FloatTensor(num_labels+2, num_labels+2)
+        )
+
+    def forward(self, pred, ref, viterbi=False, return_best_sequence=False):
+        seq_len = pred.size(0)
+
+        small = -1000
+        b_s = Variable(torch.from_numpy(
+            np.array([[small] * self.num_labels + [0, small]]).astype(np.float32)
+        ))
+        e_s = Variable(torch.from_numpy(
+            np.array([[small] * self.num_labels + [small, 0]]).astype(np.float32)
+        ))
+        observations = torch.cat(
+            [pred, Variable(small * torch.ones((seq_len, 2)))],
+            dim=1
+        )
+        observations = torch.cat(
+            [b_s, observations, e_s],
+            dim=0
+        )
+
+        # compute all path scores
+        paths_scores = []
+        previous = observations[0]
+        for obs in observations[1:]:
+            _previous = torch.unsqueeze(previous, 1)
+            _obs = torch.unsqueeze(obs, 0)
+            if viterbi:
+                scores = _previous + _obs + self.transitions
+                out, out_indices = scores.max(dim=0)
+                if return_best_sequence:
+                    paths_scores.append((out, out_indices))
+                else:
+                    paths_scores.append(out)
+                previous = out
+            else:
+                previous = log_sum_exp(_previous + _obs + self.transitions,
+                                       dim=0)
+                paths_scores.append(previous)
+
+        if return_best_sequence:
+            _, previous = paths_scores[-1][1].max(dim=0)
+            sequence = []
+            for s in paths_scores[::-1]:
+                previous = s[1][previous]
+                sequence.append(previous)
+
+            sequence = torch.cat(sequence[::-1]+[paths_scores[-1][0].max(dim=0)[1]])
+
+            return sequence[1:-1]
+
+        all_paths_scores = log_sum_exp(paths_scores[-1], dim=0)
+
+        # compute real path score if reference is provided
+        if ref is not None:
+            # Score from tags
+            real_path_score = pred[torch.from_numpy(np.arange(seq_len)), ref.data].sum()
+
+            # Score from transitions
+            b_id = Variable(torch.from_numpy(np.array([self.num_labels], dtype=np.long)))
+            e_id = Variable(torch.from_numpy(np.array([self.num_labels + 1], dtype=np.long)))
+            padded_tags_ids = torch.cat([b_id, ref, e_id], dim=0)
+            real_path_score += self.transitions[
+                padded_tags_ids[torch.from_numpy(np.arange(seq_len + 1))].data,
+                padded_tags_ids[torch.from_numpy(np.arange(seq_len + 1) + 1)].data
+            ].sum()
+
+            # compute loss
+            loss = all_paths_scores - real_path_score
+
+            return loss
 
 

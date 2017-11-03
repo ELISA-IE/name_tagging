@@ -227,7 +227,7 @@ def pad_input(inputs, inputs_pos):
     # get the max sequence length in the batch
     max_len = max(inputs_pos)
 
-    padding = list(torch.zeros(torch.LongTensor([inputs[0][0]]).shape))
+    padding = list(torch.zeros(torch.FloatTensor([inputs[0][0]]).shape).type(torch.LongTensor))
 
     padded_inputs = []
     for item in inputs:
@@ -293,9 +293,9 @@ def create_input(data, parameters, add_label=True):
     # convert inputs and labels to Variable
     for k, v in inputs.items():
         if k == 'words':
-            v = Variable(torch.FloatTensor(v).long(), requires_grad=False)
+            v = Variable(torch.LongTensor(v))
         elif k == 'tags':
-            v = Variable(torch.FloatTensor(v).long(), requires_grad=False)
+            v = Variable(torch.LongTensor(v))
         else:
             continue
 
