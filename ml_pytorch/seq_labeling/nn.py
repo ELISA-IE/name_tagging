@@ -5,8 +5,9 @@ import numpy as np
 import _pickle as cPickle
 from torch.autograd import Variable
 from torch.nn.parameter import Parameter
-from seq_labeling.loader import load_embedding
-from ml_utils import init_param, log_sum_exp
+from ml_pytorch.seq_labeling.loader import load_embedding
+from ml_pytorch.ml_utils import init_param, log_sum_exp
+from ml_pytorch import LongTensor, FloatTensor
 
 
 class SeqLabeling(nn.Module):
@@ -108,7 +109,7 @@ class SeqLabeling(nn.Module):
         #
         words = inputs['words']
 
-        word_emb = self.word_emb(words.type(torch.LongTensor))
+        word_emb = self.word_emb(words.type(LongTensor))
 
         word_emb = torch.nn.utils.rnn.pack_padded_sequence(word_emb, batch_len,
                                                            batch_first=True)
@@ -151,16 +152,17 @@ class SeqLabeling(nn.Module):
                 preds = linear_out
             reference = inputs['tags']
 
-            for i in range(len(batch_len)):
-                valid_output = preds[i][:batch_len[i]]
-                valid_target = reference[i][:batch_len[i]]
+            # for i in range(len(batch_len)):
+            #     valid_output = preds[i][:batch_len[i]]
+            #     valid_target = reference[i][:batch_len[i]]
+            #
+            #     step_loss = self.criterion(valid_output, valid_target)
+            #
+            #     loss += step_loss
+            #
+            # loss = loss / torch.sum(torch.from_numpy(batch_len))
 
-                step_loss = self.criterion(valid_output, valid_target)
-
-                loss += step_loss
-
-            loss = loss / torch.sum(torch.from_numpy(batch_len))
-
+            loss = self.criterion(preds, reference, batch_len)
         return outputs, loss
 
     def save_mappings(self, id_to_word, id_to_char, id_to_tag, id_to_feat_list):
@@ -185,12 +187,17 @@ class CrossEntropyLoss(nn.Module):
     def __init__(self):
         super(CrossEntropyLoss, self).__init__()
 
-    def forward(self, pred, ref):
-        onehot_target = torch.zeros(pred.size())
-        onehot_target[range(len(ref)), ref.data] = 1
-        onehot_target = Variable(onehot_target, requires_grad=False)
+    def forward(self, pred, ref, batch_len):
+        mask = np.zeros((len(batch_len), max(batch_len)))
+        for i in range(len(batch_len)):
+            mask[i, range(batch_len[i])] = 1
+        mask = Variable(torch.from_numpy(mask).type(FloatTensor))
+        reshaped_pred = - torch.log(pred).view(-1, pred.size()[2])
+        loss = reshaped_pred[torch.from_numpy(np.arange(reshaped_pred.size()[0])).type(LongTensor), ref.view(ref.numel()).data]
 
-        loss = torch.sum(- onehot_target * torch.log(pred))
+        loss = torch.sum(loss * mask.view(mask.numel()))
+
+        loss = loss / torch.sum(torch.from_numpy(batch_len))
 
         return loss
 
@@ -201,7 +208,7 @@ class CRFLoss(nn.Module):
 
         self.num_labels = num_labels
         self.transitions = Parameter(
-            torch.FloatTensor(num_labels+2, num_labels+2)
+            FloatTensor(num_labels+2, num_labels+2)
         )
 
     def forward(self, pred, ref, viterbi=False, return_best_sequence=False):
@@ -210,12 +217,12 @@ class CRFLoss(nn.Module):
         small = -1000
         b_s = Variable(torch.from_numpy(
             np.array([[small] * self.num_labels + [0, small]]).astype(np.float32)
-        ))
+        ).type(FloatTensor))
         e_s = Variable(torch.from_numpy(
             np.array([[small] * self.num_labels + [small, 0]]).astype(np.float32)
-        ))
+        ).type(FloatTensor))
         observations = torch.cat(
-            [pred, Variable(small * torch.ones((seq_len, 2)))],
+            [pred, Variable(small * torch.ones((seq_len, 2)).type(FloatTensor))],
             dim=1
         )
         observations = torch.cat(
@@ -258,15 +265,15 @@ class CRFLoss(nn.Module):
         # compute real path score if reference is provided
         if ref is not None:
             # Score from tags
-            real_path_score = pred[torch.from_numpy(np.arange(seq_len)), ref.data].sum()
+            real_path_score = pred[torch.from_numpy(np.arange(seq_len)).type(LongTensor), ref.data].sum()
 
             # Score from transitions
-            b_id = Variable(torch.from_numpy(np.array([self.num_labels], dtype=np.long)))
-            e_id = Variable(torch.from_numpy(np.array([self.num_labels + 1], dtype=np.long)))
+            b_id = Variable(torch.from_numpy(np.array([self.num_labels], dtype=np.long)).type(LongTensor))
+            e_id = Variable(torch.from_numpy(np.array([self.num_labels + 1], dtype=np.long)).type(LongTensor))
             padded_tags_ids = torch.cat([b_id, ref, e_id], dim=0)
             real_path_score += self.transitions[
-                padded_tags_ids[torch.from_numpy(np.arange(seq_len + 1))].data,
-                padded_tags_ids[torch.from_numpy(np.arange(seq_len + 1) + 1)].data
+                padded_tags_ids[torch.from_numpy(np.arange(seq_len + 1)).type(LongTensor)].data,
+                padded_tags_ids[torch.from_numpy(np.arange(seq_len + 1) + 1).type(LongTensor)].data
             ].sum()
 
             # compute loss

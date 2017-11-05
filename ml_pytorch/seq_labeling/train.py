@@ -3,26 +3,23 @@ import sys
 import argparse
 import time
 import timeit
-import operator
 import random
 import torch
-import copy
 import itertools
 
 from torch.autograd import Variable
 import torch.optim as optim
 from collections import OrderedDict
 
-from seq_labeling.nn import SeqLabeling
-from seq_labeling.utils import create_input, Tee
-from seq_labeling.utils import evaluate, eval_script
-from seq_labeling.loader import word_mapping, char_mapping, tag_mapping, feats_mapping
-from seq_labeling.loader import update_tag_scheme, prepare_dataset, load_sentences
-from seq_labeling.loader import augment_with_pretrained
+from ml_pytorch.seq_labeling.nn import SeqLabeling
+from ml_pytorch.seq_labeling.utils import create_input, Tee
+from ml_pytorch.seq_labeling.utils import evaluate, eval_script
+from ml_pytorch.seq_labeling.loader import word_mapping, char_mapping, tag_mapping, feats_mapping
+from ml_pytorch.seq_labeling.loader import update_tag_scheme, prepare_dataset, load_sentences
+from ml_pytorch.seq_labeling.loader import augment_with_pretrained
 # external features
-from seq_labeling.generate_features import generate_features
-from ml_utils import exp_lr_scheduler
-from visualize import make_dot
+from ml_pytorch.seq_labeling.generate_features import generate_features
+from ml_pytorch.ml_utils import exp_lr_scheduler
 
 
 # Read parameters from command line
@@ -119,6 +116,10 @@ parser.add_argument(
     "--batch_size", default="5",
     type=int, help="Batch size."
 )
+parser.add_argument(
+    "--gpu", default="0",
+    type=int, help="Use GPU."
+)
 #
 # external features
 #
@@ -173,6 +174,7 @@ parameters['dropout'] = args.dropout
 parameters['lr_method'] = args.lr_method
 parameters['num_epochs'] = args.num_epochs
 parameters['batch_size'] = args.batch_size
+parameters['gpu'] = args.gpu
 # external features
 parameters['feat_dim'] = args.feat_dim
 parameters['comb_method'] = args.comb_method

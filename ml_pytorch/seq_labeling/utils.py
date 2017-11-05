@@ -8,7 +8,7 @@ import theano
 import torch
 import collections
 from torch.autograd import Variable
-import itertools
+from ml_pytorch import LongTensor
 
 try:
     import _pickle as cPickle
@@ -227,7 +227,7 @@ def pad_input(inputs, inputs_pos):
     # get the max sequence length in the batch
     max_len = max(inputs_pos)
 
-    padding = list(torch.zeros(torch.FloatTensor([inputs[0][0]]).shape).type(torch.LongTensor))
+    padding = list(torch.zeros(torch.FloatTensor([inputs[0][0]]).shape).type(LongTensor))
 
     padded_inputs = []
     for item in inputs:
@@ -293,9 +293,9 @@ def create_input(data, parameters, add_label=True):
     # convert inputs and labels to Variable
     for k, v in inputs.items():
         if k == 'words':
-            v = Variable(torch.LongTensor(v))
+            v = Variable(LongTensor(v))
         elif k == 'tags':
-            v = Variable(torch.LongTensor(v))
+            v = Variable(LongTensor(v))
         else:
             continue
 

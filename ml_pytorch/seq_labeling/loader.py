@@ -16,8 +16,8 @@ try:
 except ImportError:
     import cPickle
 
-from seq_labeling.utils import create_dico, create_mapping, zero_digits
-from seq_labeling.utils import iob2, iob_iobes
+from ml_pytorch.seq_labeling.utils import create_dico, create_mapping, zero_digits
+from ml_pytorch.seq_labeling.utils import iob2, iob_iobes
 
 
 def load_sentences(path, lower=False, zeros=False):

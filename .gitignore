@@ -1,7 +1,7 @@
 .idea/
 **/.DS_Store
 example/
-seq_labeling/evaluation/tmp
+ml_pytorch/seq_labeling/evaluation/tmp
 
 
 

@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-
+from ml_pytorch import FloatTensor
 
 def exp_lr_scheduler(optimizer, epoch, init_lr=0.01, lr_decay_epoch=7):
     """Decay learning rate by a factor of 0.1 every lr_decay_epoch epochs."""
@@ -29,7 +29,7 @@ def init_param(layer):
         return value
 
     for p in layer.parameters():
-        p.data = torch.from_numpy(init(p.size())).type(torch.FloatTensor)
+        p.data = torch.from_numpy(init(p.size())).type(FloatTensor)
 
     return layer
 
