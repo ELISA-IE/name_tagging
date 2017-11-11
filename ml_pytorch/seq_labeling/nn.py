@@ -6,7 +6,7 @@ import _pickle as cPickle
 from torch.autograd import Variable
 from torch.nn.parameter import Parameter
 from ml_pytorch.seq_labeling.loader import load_embedding
-from ml_pytorch.ml_utils import init_param, log_sum_exp
+from ml_pytorch.ml_utils import init_param, log_sum_exp, sequence_mask
 from ml_pytorch import LongTensor, FloatTensor
 
 
@@ -27,7 +27,8 @@ class SeqLabeling(nn.Module):
         self.word_emb = nn.Embedding(word_vocab_size, word_dim)
 
         self.word_lstm = nn.LSTM(word_dim, word_lstm_dim, 1,
-                                 bidirectional=word_bidirect, batch_first=True)
+                                 bidirectional=word_bidirect,
+                                 batch_first=True)
         if word_bidirect:
             linear_input_dim = 2 * word_lstm_dim
         else:
@@ -86,9 +87,9 @@ class SeqLabeling(nn.Module):
                 new_weights[i] = torch.from_numpy(pretrained[word.lower()])
                 c_lower += 1
             elif re.sub('\d', '0', word.lower()) in pretrained:
-                new_weights[i] = torch.from_numpy(pretrained[
-                                                      re.sub('\d', '0', word.lower())
-                                                  ])
+                new_weights[i] = torch.from_numpy(
+                    pretrained[re.sub('\d', '0', word.lower())]
+                )
                 c_zeros += 1
         self.word_emb.weight = nn.Parameter(new_weights)
 
@@ -111,15 +112,17 @@ class SeqLabeling(nn.Module):
 
         word_emb = self.word_emb(words.type(LongTensor))
 
-        word_emb = torch.nn.utils.rnn.pack_padded_sequence(word_emb, batch_len,
-                                                           batch_first=True)
+        word_emb = torch.nn.utils.rnn.pack_padded_sequence(
+            word_emb, batch_len, batch_first=True
+        )
 
         #
         # bi-directional lstm
         #
         word_lstm_out, word_lstm_h = self.word_lstm(word_emb)
-        word_lstm_out, _ = torch.nn.utils.rnn.pad_packed_sequence(word_lstm_out,
-                                                                  batch_first=True)
+        word_lstm_out, _ = torch.nn.utils.rnn.pad_packed_sequence(
+            word_lstm_out, batch_first=True
+        )
 
         #
         # fully connected layer
@@ -127,16 +130,14 @@ class SeqLabeling(nn.Module):
         linear_out = self.linear(word_lstm_out)
 
         if type(self.criterion) == CrossEntropyLoss:
-            outputs = torch.stack([self.softmax(linear_out[i]) for i in range(len(batch_len))], 0)
+            outputs = torch.stack(
+                [self.softmax(linear_out[i]) for i in range(len(batch_len))], 0
+            )
         elif type(self.criterion) == CRFLoss and not self.training:
             preds = linear_out
-            outputs = []
-            for i in range(len(batch_len)):
-                valid_output = preds[i][:batch_len[i]]
-                _output = self.criterion(valid_output, None,
-                                         viterbi=True,
-                                         return_best_sequence=True)
-                outputs.append(_output)
+            outputs = self.criterion(
+                preds, None, batch_len, viterbi=True, return_best_sequence=True
+            )
         else:
             outputs = None
 
@@ -152,17 +153,9 @@ class SeqLabeling(nn.Module):
                 preds = linear_out
             reference = inputs['tags']
 
-            # for i in range(len(batch_len)):
-            #     valid_output = preds[i][:batch_len[i]]
-            #     valid_target = reference[i][:batch_len[i]]
-            #
-            #     step_loss = self.criterion(valid_output, valid_target)
-            #
-            #     loss += step_loss
-            #
-            # loss = loss / torch.sum(torch.from_numpy(batch_len))
-
             loss = self.criterion(preds, reference, batch_len)
+            loss = loss / torch.sum(torch.from_numpy(batch_len))
+
         return outputs, loss
 
     def save_mappings(self, id_to_word, id_to_char, id_to_tag, id_to_feat_list):
@@ -188,16 +181,22 @@ class CrossEntropyLoss(nn.Module):
         super(CrossEntropyLoss, self).__init__()
 
     def forward(self, pred, ref, batch_len):
-        mask = np.zeros((len(batch_len), max(batch_len)))
-        for i in range(len(batch_len)):
-            mask[i, range(batch_len[i])] = 1
+        batch_size = pred.size(0)
+        seq_len = pred.size(1)
+
+        mask = sequence_mask(batch_len)
         mask = Variable(torch.from_numpy(mask).type(FloatTensor))
-        reshaped_pred = - torch.log(pred).view(-1, pred.size()[2])
-        loss = reshaped_pred[torch.from_numpy(np.arange(reshaped_pred.size()[0])).type(LongTensor), ref.view(ref.numel()).data]
 
-        loss = torch.sum(loss * mask.view(mask.numel()))
-
-        loss = loss / torch.sum(torch.from_numpy(batch_len))
+        loss = - torch.log(pred)[
+            torch.from_numpy(
+                np.array([np.arange(batch_size)] * seq_len).transpose()
+            ).type(LongTensor),
+            torch.from_numpy(
+                np.array([np.arange(seq_len)] * batch_size)
+            ).type(LongTensor),
+            ref.data
+        ]
+        loss = torch.sum(loss * mask)
 
         return loss
 
@@ -211,74 +210,147 @@ class CRFLoss(nn.Module):
             FloatTensor(num_labels+2, num_labels+2)
         )
 
-    def forward(self, pred, ref, viterbi=False, return_best_sequence=False):
-        seq_len = pred.size(0)
+    def forward(self, pred, ref, batch_len,
+                viterbi=False, return_best_sequence=False):
+        batch_size = pred.size(0)
+        seq_len = pred.size(1)
+        label_size = pred.size(2)
 
         small = -1000
-        b_s = Variable(torch.from_numpy(
-            np.array([[small] * self.num_labels + [0, small]]).astype(np.float32)
-        ).type(FloatTensor))
-        e_s = Variable(torch.from_numpy(
-            np.array([[small] * self.num_labels + [small, 0]]).astype(np.float32)
-        ).type(FloatTensor))
+        b_s_array = np.array(
+            [[[small] * self.num_labels + [0, small]]] * batch_size
+        ).astype(np.float32)
+        b_s = Variable(torch.from_numpy(b_s_array)).type(FloatTensor)
+        right_padding_array = np.array(
+            [[[0] * self.num_labels + [small, small]]] * batch_size
+        ).astype(np.float32)
+        right_padding = Variable(
+            torch.from_numpy(right_padding_array)
+        ).type(FloatTensor)
         observations = torch.cat(
-            [pred, Variable(small * torch.ones((seq_len, 2)).type(FloatTensor))],
+            [pred, Variable(
+                small * torch.ones((batch_size, seq_len, 2))
+            ).type(FloatTensor)],
+            dim=2
+        )
+        observations = torch.cat(
+            [b_s, observations, right_padding],
             dim=1
         )
-        observations = torch.cat(
-            [b_s, observations, e_s],
-            dim=0
-        )
+
+        e_s = np.array([small] * self.num_labels + [0, 1000]).astype(np.float32)
+        e_s_mask = np.zeros(observations.size())
+        for i in range(batch_size):
+            e_s_mask[i][batch_len[i]+1] = e_s
+
+        observations += Variable(torch.from_numpy(e_s_mask)).type(FloatTensor)
 
         # compute all path scores
-        paths_scores = []
-        previous = observations[0]
-        for obs in observations[1:]:
-            _previous = torch.unsqueeze(previous, 1)
-            _obs = torch.unsqueeze(obs, 0)
+        paths_scores = Variable(
+            FloatTensor(seq_len+1, batch_size, label_size+2)
+        )
+        paths_indices = Variable(
+            LongTensor(seq_len+1, batch_size, label_size+2)
+        )
+        previous = observations[:, 0]
+        for i in range(1, observations.size(1)):
+            obs = observations[:, i]
+            _previous = torch.unsqueeze(previous, 2)
+            _obs = torch.unsqueeze(obs, 1)
             if viterbi:
                 scores = _previous + _obs + self.transitions
-                out, out_indices = scores.max(dim=0)
+                out, out_indices = scores.max(dim=1)
                 if return_best_sequence:
-                    paths_scores.append((out, out_indices))
-                else:
-                    paths_scores.append(out)
+                    paths_indices[i-1] = out_indices
+                paths_scores[i-1] = out
                 previous = out
             else:
                 previous = log_sum_exp(_previous + _obs + self.transitions,
-                                       dim=0)
-                paths_scores.append(previous)
+                                       dim=1)
+                paths_scores[i-1] = previous
+
+        paths_scores = paths_scores.permute(1, 0, 2)
+        paths_indices = paths_indices.permute(1, 0, 2)
 
         if return_best_sequence:
-            _, previous = paths_scores[-1][1].max(dim=0)
             sequence = []
-            for s in paths_scores[::-1]:
-                previous = s[1][previous]
-                sequence.append(previous)
+            for i in range(len(paths_indices)):
+                p_indices = paths_indices[i][:batch_len[i]+1]
+                p_score = paths_scores[i][:batch_len[i]+1]
+                _, previous = p_indices[-1].max(dim=0)
+                seq = []
+                for j in reversed(range(len(p_score))):
+                    s = p_indices[j]
+                    previous = s[previous]
+                    seq.append(previous)
 
-            sequence = torch.cat(sequence[::-1]+[paths_scores[-1][0].max(dim=0)[1]])
+                seq = torch.cat(seq[::-1]+[p_score[-1].max(dim=0)[1]])
 
-            return sequence[1:-1]
+                sequence.append(seq[1:-1])
 
-        all_paths_scores = log_sum_exp(paths_scores[-1], dim=0)
+            return sequence
+
+        all_paths_scores = log_sum_exp(
+            paths_scores[
+                torch.from_numpy(np.arange(batch_size)).type(LongTensor),
+                torch.from_numpy(batch_len).type(LongTensor)
+            ],
+            dim=1
+        ).sum()
 
         # compute real path score if reference is provided
         if ref is not None:
             # Score from tags
-            real_path_score = pred[torch.from_numpy(np.arange(seq_len)).type(LongTensor), ref.data].sum()
+            real_path_mask = Variable(
+                torch.from_numpy(sequence_mask(batch_len))
+            ).type(FloatTensor)
+            real_path_score = pred[
+                torch.from_numpy(
+                    np.array([np.arange(batch_size)]*seq_len).transpose()
+                ).type(LongTensor),
+                torch.from_numpy(
+                    np.array([np.arange(seq_len)]*batch_size)
+                ).type(LongTensor),
+                ref.data
+            ]
+            real_path_score = torch.sum(real_path_score * real_path_mask)
 
             # Score from transitions
-            b_id = Variable(torch.from_numpy(np.array([self.num_labels], dtype=np.long)).type(LongTensor))
-            e_id = Variable(torch.from_numpy(np.array([self.num_labels + 1], dtype=np.long)).type(LongTensor))
-            padded_tags_ids = torch.cat([b_id, ref, e_id], dim=0)
-            real_path_score += self.transitions[
-                padded_tags_ids[torch.from_numpy(np.arange(seq_len + 1)).type(LongTensor)].data,
-                padded_tags_ids[torch.from_numpy(np.arange(seq_len + 1) + 1).type(LongTensor)].data
-            ].sum()
+            b_id = Variable(
+                torch.from_numpy(
+                    np.array([[self.num_labels]] * batch_size)
+                ).type(LongTensor)
+            )
+            right_padding = Variable(torch.zeros(b_id.size())).type(LongTensor)
+
+            padded_tags_ids = torch.cat([b_id, ref, right_padding], dim=1)
+
+            e_id = np.array([self.num_labels+1])
+            e_id_mask = np.zeros(padded_tags_ids.size())
+            for i in range(batch_size):
+                e_id_mask[i][batch_len[i] + 1] = e_id
+
+            padded_tags_ids += Variable(
+                torch.from_numpy(e_id_mask)
+            ).type(LongTensor)
+
+            transition_score_mask = Variable(
+                torch.from_numpy(sequence_mask(batch_len+1))
+            ).type(FloatTensor)
+            real_transition_score = self.transitions[
+                padded_tags_ids[
+                :, torch.from_numpy(np.arange(seq_len + 1)).type(LongTensor)
+                ].data,
+                padded_tags_ids[
+                :, torch.from_numpy(np.arange(seq_len + 1) + 1).type(LongTensor)
+                ].data
+            ]
+            real_path_score += torch.sum(
+                real_transition_score * transition_score_mask
+            )
 
             # compute loss
             loss = all_paths_scores - real_path_score
 
             return loss
-
 

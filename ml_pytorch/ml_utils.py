@@ -41,3 +41,14 @@ def log_sum_exp(x, dim=None):
     xmax, _ = x.max(dim=dim, keepdim=True)
     xmax_, _ = x.max(dim=dim)
     return xmax_ + torch.log(torch.exp(x - xmax).sum(dim=dim))
+
+
+def sequence_mask(batch_len, max_len=None):
+    if not max_len:
+        max_len = np.max(batch_len)
+
+    mask = np.zeros((len(batch_len), max_len))
+    for i in range(len(batch_len)):
+        mask[i, range(batch_len[i])] = 1
+
+    return mask
