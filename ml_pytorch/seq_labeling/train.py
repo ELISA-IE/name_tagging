@@ -6,7 +6,7 @@ import timeit
 import random
 import torch
 import itertools
-
+import numpy as np
 from torch.autograd import Variable
 import torch.optim as optim
 from collections import OrderedDict
@@ -275,6 +275,8 @@ else:
 dico_chars, char_to_id, id_to_char = char_mapping(train_sentences)
 dico_tags, tag_to_id, id_to_tag = tag_mapping(train_sentences)
 parameters['label_size'] = len(id_to_tag)
+parameters['word_vocab_size'] = len(id_to_word)
+parameters['char_vocab_size'] = len(id_to_char)
 
 # create a dictionary and a mapping for each feature
 dico_feats_list, feat_to_id_list, id_to_feat_list = feats_mapping(train_feats)
@@ -301,20 +303,33 @@ print("%i / %i / %i sentences in train / dev / test." % (
     len(dataset['train']), len(dataset['dev']), len(dataset['test'])))
 
 # initialize model
-model = SeqLabeling(word_vocab_size=len(id_to_word), **parameters)
+print('model initializing...')
+model = SeqLabeling(parameters)
 model.load_pretrained(id_to_word, **parameters)
-# Observe that all parameters are being optimized
-optimizer_ft = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
 
-# Save the mappings to disk
-# print('Saving the mappings to disk...')
-# model.save_mappings(id_to_word, id_to_char, id_to_tag, id_to_feat_list)
-
+# Parse optimization method parameters
+lr_method = parameters['lr_method']
+if "-" in lr_method:
+    lr_method_name = lr_method[:lr_method.find('-')]
+    lr_method_parameters = {}
+    for x in lr_method[lr_method.find('-') + 1:].split('-'):
+        split = x.split('=')
+        assert len(split) == 2
+        lr_method_parameters[split[0]] = float(split[1])
+else:
+    lr_method_name = lr_method
+    lr_method_parameters = {}
+# initialize optimizer function
+if lr_method_name == 'sgd':
+    optimizer_ft = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+else:
+    print('unknown optimization method.')
 
 since = time.time()
 best_model = model
-best_f1 = 0.0
-best_acc = 0.0
+best_dev = 0.0
+best_test = 0.0
+metric = 'f1'  # use metric 'f1' or 'acc'
 num_epochs = args.num_epochs
 batch_size = args.batch_size
 
@@ -326,68 +341,105 @@ for epoch in range(num_epochs):
     # Each epoch has a training and validation phase
     for phase in ['train', 'dev', 'test'][:2]:
         if phase == 'train':
-            optimizer = exp_lr_scheduler(optimizer_ft, epoch, init_lr=0.01)
+            optimizer = exp_lr_scheduler(optimizer_ft, epoch,
+                                         **lr_method_parameters)
             model.train(True)  # Set model to training mode
             random.shuffle(dataset[phase])
         else:
             model.train(False)  # Set model to evaluate mode
 
-        running_loss = []
-        running_corrects = 0
+        epoch_loss = []
 
         # Iterate over data.
         preds = []
         for i in range(0, len(dataset[phase]), batch_size):
-            inputs, index_mapping, batch_len = create_input(dataset[phase][i:i+batch_size], parameters)
+            inputs, seq_index_mapping, char_index_mapping, seq_len, char_len = create_input(dataset[phase][i:i+batch_size], parameters)
 
             # forward
-            forward_start = timeit.default_timer()
-            outputs, loss = model.forward(inputs, batch_len)
-            forward_elapsed = timeit.default_timer() - forward_start
-            # print('forward elapsed: ', forward_elapsed)
+            outputs, loss = model.forward(inputs, seq_len, char_len, char_index_mapping)
+            try:
+                epoch_loss.append(loss.data[0])
+            except AttributeError:
+                pass
 
             # backward + optimize only if in training phase
             if phase == 'train':
-                backward_start = timeit.default_timer()
-
                 # zero the parameter gradients
                 optimizer.zero_grad()
 
                 loss.backward()
 
+                # for p in model.char_lstm.parameters():
+                #     print(p.grad)
+                # for p in model.char_emb.parameters():
+                #     print(p.grad)
+                # for p in model.word_lstm.parameters():
+                #     print(p.grad)
+                # for p in model.word_emb.parameters():
+                #     print(p.grad)
+                # print(model.word_lstm_init_hidden[0].grad)
+                # print(model.word_lstm_init_hidden[0].grad)
+
+                # `clip_grad_norm` helps prevent the exploding gradient problem
+                # in RNNs / LSTMs.
+                torch.nn.utils.clip_grad_norm(model.parameters(), 5)
+
                 optimizer.step()
 
-                sys.stdout.write('%d instances processed. current batch loss: %f\r' % (i, loss.data[0]))
+                sys.stdout.write(
+                    '%d instances processed. current batch loss: %f\r' %
+                    (i, np.mean(epoch_loss))
+                )
                 sys.stdout.flush()
-
-                # statistics
-                running_loss.append(loss.data[0])
-
-                backward_elapsed = timeit.default_timer() - backward_start
-                # print('backward elapsed: ', backward_elapsed)
             else:
                 if parameters['crf']:
-                    preds += [outputs[index_mapping[j]].data for j in range(len(outputs))]
+                    preds += [outputs[seq_index_mapping[j]].data
+                              for j in range(len(outputs))]
                 else:
                     _, _preds = torch.max(outputs.data, 2)
 
-                    preds += [_preds[index_mapping[j]][:batch_len[index_mapping[j]]] for j in range(len(index_mapping))]
+                    preds += [
+                        _preds[seq_index_mapping[j]][:seq_len[seq_index_mapping[j]]]
+                        for j in range(len(seq_index_mapping))
+                        ]
 
         if phase == 'train':
-            epoch_loss = sum(running_loss) / len(running_loss)
+            epoch_loss = sum(epoch_loss) / len(epoch_loss)
             print('{} Loss: {:.4f}\n'.format(phase, epoch_loss))
         else:
             epoch_f1, epoch_acc = evaluate(preds, dataset[phase], id_to_tag)
-            print('{} F1: {:.4f} Acc: {:.4f}\n'.format(phase, epoch_f1, epoch_acc))
+            if metric == 'f1':
+                epoch_score = epoch_f1
+            elif metric == 'acc':
+                epoch_score = epoch_acc
+            print(
+                '{} F1: {:.4f} Acc: {:.4f}\n'.format(phase, epoch_f1, epoch_acc)
+            )
 
         # deep copy the model
-        if phase == 'val' and epoch_f1 > best_f1:
-            best_f1 = epoch_f1
-            # best_model = copy.deepcopy(model)
+        if phase == 'dev' and epoch_score > best_dev:
+            best_dev = epoch_score
+            print('new best score on dev: %.4f' % best_dev)
+            print('saving the current model to disk...')
 
-        # if phase == 'val' and epoch_acc > best_acc:
-        #     best_acc = epoch_acc
-        #     best_model = copy.deepcopy(model)
+            state = {
+                'epoch': epoch + 1,
+                'parameters': parameters,
+                'mappings': {
+                    'id_to_word': id_to_word,
+                    'id_to_char': id_to_char,
+                    'id_to_tag': id_to_tag,
+                    'id_to_feat_list': id_to_feat_list  # boliang
+                },
+                'state_dict': model.state_dict(),
+                'best_prec1': best_dev,
+                'optimizer': optimizer.state_dict(),
+            }
+            torch.save(state, os.path.join(model_dir, 'model_best.pth.tar'))
+
+        if phase == 'test' and epoch_score > best_test:
+            best_test = epoch_score
+            print('new best score on test: %.4f' % best_test)
 
     time_epoch_end = time.time()  # epoch end time
     print('epoch training time: %f seconds' % round(

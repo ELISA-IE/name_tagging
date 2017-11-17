@@ -2,6 +2,8 @@ import os
 import re
 import io
 import sys
+import shutil
+import itertools
 import codecs
 import numpy as np
 import theano
@@ -195,45 +197,60 @@ def pad_word_chars(words):
     # max_length = max([len(word) for word in words])
     # char_for = []
     # char_rev = []
-    # char_pos = []
+    # char_len = []
     # for word in words:
     #     padding = [0] * (max_length - len(word))
     #     char_for.append(word + padding)
     #     char_rev.append(word[::-1] + padding)
-    #     char_pos.append(len(word) - 1)
-    # return char_for, char_rev, char_pos
+    #     char_len.append(len(word) - 1)
+    # return char_for, char_rev, char_len
 
     max_length = 25
     char_for = []
     char_rev = []
-    char_pos = []
+    char_len = []
     for word in words:
         if len(word) >= max_length:
             # print("exceed the max length ... ", len(word))
             word = word[:max_length]
             char_for.append(word)
             char_rev.append(word[::-1])
-            char_pos.append(len(word) - 1)
+            char_len.append(len(word) - 1)
         else:
             padding_left = [0]
             padding = [0] * (max_length - 1 - len(word))
             char_for.append(padding_left + word + padding)
             char_rev.append(padding_left + word[::-1] + padding)
-            char_pos.append(len(word))
-    return char_for, char_rev, char_pos
+            char_len.append(len(word))
+    return char_for, char_rev, char_len
 
 
-def pad_input(inputs, inputs_pos):
+def pad_word(inputs, seq_len):
     # get the max sequence length in the batch
-    max_len = max(inputs_pos)
-
-    padding = list(torch.zeros(torch.FloatTensor([inputs[0][0]]).shape).type(LongTensor))
+    max_len = seq_len[0]
 
     padded_inputs = []
     for item in inputs:
-        padded_inputs.append(item + padding * (max_len - len(item)))
+        padded_inputs.append(item + [0] * (max_len - len(item)))
 
     return padded_inputs
+
+
+def pad_chars(inputs):
+    chained_chars = list(itertools.chain.from_iterable(inputs))
+
+    char_index_mapping, chars = zip(
+        *[item for item in sorted(
+            enumerate(chained_chars), key=lambda x: len(x[1]), reverse=True
+        )]
+    )
+    char_index_mapping = {v: i for i, v in enumerate(char_index_mapping)}
+
+    char_len = [len(c) for c in chars]
+
+    chars = pad_word(chars, char_len)
+
+    return chars, char_index_mapping, char_len
 
 
 def create_input(data, parameters, add_label=True):
@@ -242,21 +259,18 @@ def create_input(data, parameters, add_label=True):
     the training or the evaluation function.
     """
     # sort data by sequence lenght
-    index_mapping, data = zip(*[item for item in sorted(enumerate(data), key=lambda x: len(x[1]['words']), reverse=True)])
-    index_mapping = {v: i for i, v in enumerate(index_mapping)}
+    seq_index_mapping, data = zip(*[item for item in sorted(enumerate(data), key=lambda x: len(x[1]['words']), reverse=True)])
+    seq_index_mapping = {v: i for i, v in enumerate(seq_index_mapping)}
 
     inputs = collections.defaultdict(list)
-    inputs_pos = []
-    inputs_char_pos = []
+    seq_len = []
+
     for d in data:
         words = d['words']
+        seq_len.append(len(words))
+
         stems = d['stems']
         chars = d['chars']
-        # pad chars
-        char_pos = sorted([len(item) for item in chars], reverse=True)
-        chars = sorted(chars, key=lambda x: len(x), reverse=True)
-        chars = pad_input(chars, char_pos)
-        inputs_char_pos.append(char_pos)
 
         if parameters['word_dim']:
             inputs['words'].append(words)
@@ -285,23 +299,27 @@ def create_input(data, parameters, add_label=True):
             tags = d['tags']
             inputs['tags'].append(tags)
 
-        inputs_pos.append(len(words))
-
+    char_index_mapping = []
+    char_len = []
     for k, v in inputs.items():
-        inputs[k] = pad_input(v, inputs_pos)
+        if k == 'chars':
+            padded_chars, char_index_mapping, char_len = pad_chars(v)
+            inputs[k] = padded_chars
+        else:
+            inputs[k] = pad_word(v, seq_len)
 
     # convert inputs and labels to Variable
     for k, v in inputs.items():
-        if k == 'words':
-            v = Variable(LongTensor(v))
-        elif k == 'tags':
-            v = Variable(LongTensor(v))
-        else:
-            continue
+        # if k == 'words':
+        #     v = Variable(LongTensor(v))
+        # elif k == 'tags':
+        #     v = Variable(LongTensor(v))
+        # else:
+        #     continue
 
-        inputs[k] = v
+        inputs[k] = Variable(LongTensor(v))
 
-    return inputs, index_mapping, inputs_pos
+    return inputs, seq_index_mapping, char_index_mapping, seq_len, char_len
 
 
 def evaluate(preds, dataset, id_to_tag, eval_out_dir=None):
@@ -492,3 +510,21 @@ class Tee(object):
     def flush(self) :
         for f in self.files:
             f.flush()
+
+
+def save_mappings(mappings_path, id_to_word, id_to_char, id_to_tag, id_to_feat_list):
+    """
+    We need to save the mappings if we want to use the model later.
+    """
+    self.id_to_word = id_to_word
+    self.id_to_char = id_to_char
+    self.id_to_tag = id_to_tag
+    self.id_to_feat_list = id_to_feat_list  # boliang
+    with open(self.mappings_path, 'wb') as f:
+        mappings = {
+            'id_to_word': self.id_to_word,
+            'id_to_char': self.id_to_char,
+            'id_to_tag': self.id_to_tag,
+            'id_to_feat_list': self.id_to_feat_list  # boliang
+        }
+        cPickle.dump(mappings, f)

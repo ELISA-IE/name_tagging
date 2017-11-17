@@ -1,6 +1,6 @@
 import torch
 
-gpu = True
+gpu = False
 
 if gpu:
     FloatTensor = torch.cuda.FloatTensor
