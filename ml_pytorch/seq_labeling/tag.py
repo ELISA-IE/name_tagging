@@ -1,6 +1,7 @@
 import argparse
 import time
 import torch
+from ml_pytorch import gpu
 
 from ml_pytorch.seq_labeling.nn import SeqLabeling
 from ml_pytorch.seq_labeling.utils import create_input, iobes_iob
@@ -29,7 +30,10 @@ parser.add_argument(
 args = parser.parse_args()
 
 print('loading model from:', args.model)
-state = torch.load(args.model)
+if gpu:
+    state = torch.load(args.model)
+else:
+    state = torch.load(args.model, map_location=lambda storage, loc: storage)
 
 parameters = state['parameters']
 mappings = state['mappings']
@@ -54,13 +58,14 @@ eval_feats, eval_stem = generate_features(eval_sentences, parameters)
 eval_dataset = prepare_dataset(
     eval_sentences,
     eval_feats, eval_stem,
-    word_to_id, char_to_id, tag_to_id, feat_to_id_list, parameters['lower']
+    word_to_id, char_to_id, tag_to_id, feat_to_id_list, parameters['lower'],
+    is_train=False
 )
 
 print("%i sentences in eval set." % len(eval_dataset))
 
 # initialize model
-model = SeqLabeling(word_vocab_size=len(word_to_id), **parameters)
+model = SeqLabeling(parameters)
 model.load_state_dict(state['state_dict'])
 model.train(False)
 
@@ -71,19 +76,19 @@ f_output = open(args.output, 'w')
 # Iterate over data.
 print('tagging...')
 for i in range(0, len(eval_dataset), batch_size):
-    inputs, index_mapping, batch_len = create_input(eval_dataset[i:i+batch_size], parameters)
+    inputs, seq_index_mapping, char_index_mapping, seq_len, char_len = create_input(eval_dataset[i:i+batch_size], parameters)
 
     # forward
-    outputs, loss = model.forward(inputs, batch_len)
+    outputs, loss = model.forward(inputs, seq_len, char_len, char_index_mapping)
     if parameters['crf']:
-        preds = [outputs[index_mapping[j]].data
+        preds = [outputs[seq_index_mapping[j]].data
                  for j in range(len(outputs))]
     else:
         _, _preds = torch.max(outputs.data, 2)
 
         preds = [
-            _preds[index_mapping[j]][:batch_len[index_mapping[j]]]
-            for j in range(len(index_mapping))
+            _preds[seq_index_mapping[j]][:seq_len[seq_index_mapping[j]]]
+            for j in range(len(seq_index_mapping))
             ]
     for j, pred in enumerate(preds):
         pred = [mappings['id_to_tag'][p] for p in pred]

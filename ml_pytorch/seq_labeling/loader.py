@@ -232,11 +232,22 @@ def prepare_sentence(sentence, feats, stem,
     Prepare a sentence for evaluation.
     """
     def f(x): return x.lower() if lower else x
+    max_sent_len = 100
+    max_word_len = 30
+    if is_train:
+        sentence = sentence[:max_sent_len]
+        feats = feats[:max_sent_len]
     str_words = [w[0] for w in sentence]
     words = [word_to_id[f(w) if f(w) in word_to_id else '<UNK>']
              for w in str_words]
-    chars = [[char_to_id[c] if c in char_to_id else 0 for c in w]
-             for w in str_words]
+    # set max word len for char embedding layer to prevent memory problem
+    if is_train:
+        chars = [[char_to_id[c] if c in char_to_id else 0 for c in w[:max_word_len]]
+                 for w in str_words]
+    else:
+        chars = [
+            [char_to_id[c] if c in char_to_id else 0 for c in w]
+            for w in str_words]
     caps = [cap_feature(w) for w in str_words]
     tags = []
     if is_train:
@@ -278,7 +289,7 @@ def prepare_sentence(sentence, feats, stem,
 
 def prepare_dataset(sentences, feats, stem,
                     word_to_id, char_to_id, tag_to_id, feat_to_id_list,
-                    lower=False):
+                    lower=False, is_train=True):
     """
     Prepare the dataset. Return a list of lists of dictionaries containing:
         - word indexes
@@ -298,7 +309,7 @@ def prepare_dataset(sentences, feats, stem,
         data.append(
             prepare_sentence(s, sent_feat, sent_stem,
                              word_to_id, char_to_id, tag_to_id, feat_to_id_list,
-                             lower, is_train=True)
+                             lower, is_train=is_train)
         )
 
     return data

@@ -2,7 +2,7 @@
 **/.DS_Store
 example/
 ml_pytorch/seq_labeling/evaluation/tmp
-
+ml_pytorch/runs
 
 
 # Created by .ignore support plugin (hsz.mobi)

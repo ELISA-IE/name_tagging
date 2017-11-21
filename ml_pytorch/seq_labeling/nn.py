@@ -2,7 +2,6 @@ import torch
 import re
 import torch.nn as nn
 import numpy as np
-import _pickle as cPickle
 from torch.autograd import Variable
 from torch.nn.parameter import Parameter
 from ml_pytorch.seq_labeling.loader import load_embedding
@@ -20,12 +19,15 @@ class SeqLabeling(nn.Module):
         self.model_param = model_param
         word_vocab_size = model_param['word_vocab_size']
         char_vocab_size = model_param['char_vocab_size']
+        feat_vocab_size = model_param['feat_vocab_size']
         word_dim = model_param['word_dim']
         word_lstm_dim = model_param['word_lstm_dim']
         char_dim = model_param['char_dim']
         char_lstm_dim = model_param['char_lstm_dim']
+        feat_dim = model_param['feat_dim']
         crf = model_param['crf']
         dropout = model_param['dropout']
+        char_conv_channel = model_param['char_conv_channel']
         label_size = model_param['label_size']
 
         # initialize word lstm input dim to 0
@@ -41,11 +43,13 @@ class SeqLabeling(nn.Module):
         # char embedding layer
         #
         if char_dim:
-            # char embedding layer
             self.char_dim = char_dim
             self.char_emb = nn.Embedding(char_vocab_size, char_dim)
 
-            # bi-lstm char layer
+        #
+        # bi-lstm char layer
+        #
+        if char_lstm_dim:
             self.char_lstm_init_hidden = (
                 Parameter(torch.randn(2, 1, char_lstm_dim).type(
                     FloatTensor)),
@@ -56,6 +60,28 @@ class SeqLabeling(nn.Module):
             self.char_lstm = nn.LSTM(char_dim, char_lstm_dim, 1,
                                      bidirectional=True, batch_first=True)
             word_lstm_input_dim += 2 * char_lstm_dim
+
+        # cnn char layer
+        if char_conv_channel:
+            max_length = 25
+            out_channel = 50
+            kernel_sizes = [2, 3, 4]
+            kernel_shape = []
+            for i in range(len(kernel_sizes)):
+                kernel_shape.append([char_dim, out_channel, kernel_sizes[i]])
+            kernel_shape = np.array(kernel_shape)
+            pool_sizes = [max_length - 2 + 1,
+                          max_length - 3 + 1,
+                          max_length - 4 + 1]
+            self.multi_convs = MultiLeNetConv1dLayer(kernel_shape, pool_sizes)
+            word_lstm_input_dim += out_channel * len(kernel_sizes)
+
+        #
+        # feat dim
+        #
+        if feat_dim:
+            self.feat_emb = [nn.Embedding(v, feat_dim) for v in feat_vocab_size]
+            word_lstm_input_dim += len(self.feat_emb) * feat_dim
 
         #
         # dropout for word bi-lstm layer
@@ -105,8 +131,14 @@ class SeqLabeling(nn.Module):
 
         if self.model_param['char_dim']:
             init_param(self.char_emb)
+        if self.model_param['char_lstm_dim']:
             init_param(self.char_lstm)
             self.char_lstm.flatten_parameters()
+        if self.model_param['char_conv_channel']:
+            init_param(self.multi_convs)
+        if self.model_param['feat_dim']:
+            for f_e in self.feat_emb:
+                init_param(f_e)
 
         init_param(self.word_lstm)
         self.word_lstm.flatten_parameters()
@@ -186,38 +218,62 @@ class SeqLabeling(nn.Module):
         #
         # char embeddings
         #
+        char_repr = []
         if self.model_param['char_dim']:
             chars = inputs['chars']
             char_emb = self.char_emb(chars.type(LongTensor))
 
-            #
-            # char bi-lstm embeddings
-            #
+        #
+        # char bi-lstm embeddings
+        #
+        if self.model_param['char_lstm_dim']:
+            lstm_char_emb = char_emb[:, :char_len[0]]
             char_lstm_dim = self.model_param['char_lstm_dim']
             char_lstm_init_hidden = (
                 self.char_lstm_init_hidden[0].expand(2, len(char_len), char_lstm_dim).contiguous(),
                 self.char_lstm_init_hidden[1].expand(2, len(char_len), char_lstm_dim).contiguous(),
             )
-            char_emb = torch.nn.utils.rnn.pack_padded_sequence(
-                char_emb, char_len, batch_first=True
+            lstm_char_emb = torch.nn.utils.rnn.pack_padded_sequence(
+                lstm_char_emb, char_len, batch_first=True
             )
             char_lstm_out, char_lstm_h = self.char_lstm(
-                char_emb, char_lstm_init_hidden
+                lstm_char_emb, char_lstm_init_hidden
             )
             char_lstm_out, _ = torch.nn.utils.rnn.pad_packed_sequence(
                 char_lstm_out, batch_first=True
             )
             char_lstm_h = char_lstm_h[0].permute(1, 0, 2).contiguous().view(len(char_len), 2*char_lstm_dim)
+            char_repr.append(char_lstm_h)
+
+        #
+        # char CNN embeddings
+        #
+        if self.model_param['char_conv_channel']:
+            lstm_cnn_emb = char_emb[:, :25]
+            char_cnn_out = self.multi_convs(lstm_cnn_emb)
+            char_repr += char_cnn_out
+
+        if char_repr:
+            char_repr = torch.cat(char_repr, dim=1)
 
             char_index_mapping = LongTensor([char_index_mapping[k] for k in range(len(char_len))])
-            char_lstm_h = char_lstm_h[char_index_mapping]
+            char_repr = char_repr[char_index_mapping]
 
-            char_lstm_h_padded_seq = nn.utils.rnn.PackedSequence(data=char_lstm_h, batch_sizes=seq_len.tolist())
-            char_lstm_h, _ = nn.utils.rnn.pad_packed_sequence(
-                char_lstm_h_padded_seq
+            char_repr_padded_seq = nn.utils.rnn.PackedSequence(data=char_repr, batch_sizes=seq_len.tolist())
+            char_repr, _ = nn.utils.rnn.pad_packed_sequence(
+                char_repr_padded_seq
             )
+            word_lstm_input.append(char_repr)
 
-            word_lstm_input.append(char_lstm_h)
+        #
+        # feat input
+        #
+        if self.model_param['feat_dim']:
+            feat_emb = []
+            for i, f_e in enumerate(self.feat_emb):
+                feat = inputs['feats'][:, :, i]
+                feat_emb.append(f_e(feat.type(LongTensor)))
+            word_lstm_input += feat_emb
 
         #
         # bi-directional lstm
@@ -317,12 +373,12 @@ class CRFLoss(nn.Module):
 
         self.num_labels = num_labels
 
-        trans_array = init_variable((num_labels+2, num_labels+2))
-        trans_array[:, self.num_labels] = -1000
-        trans_array[self.num_labels+1, :] = -1000
+        # trans_array = init_variable((num_labels+2, num_labels+2))
+        # trans_array[:, self.num_labels] = -1000
+        # trans_array[self.num_labels+1, :] = -1000
 
         self.transitions = Parameter(
-            torch.from_numpy(trans_array).type(FloatTensor)
+            torch.from_numpy(init_variable((num_labels+2, num_labels+2))).type(FloatTensor)
         )
 
     def forward(self, pred, ref, seq_len,
@@ -476,4 +532,39 @@ class CRFLoss(nn.Module):
             loss = all_paths_scores - real_path_score
 
             return loss
+
+
+class MultiLeNetConv1dLayer(nn.Module):
+    def __init__(self, kernel_shape, pool_sizes):
+        super(MultiLeNetConv1dLayer, self).__init__()
+
+        num_conv = kernel_shape.shape[0]
+        in_channels = kernel_shape[:, 0]
+        out_channels = kernel_shape[:, 1]
+        kernel_size = kernel_shape[:, 2]
+
+        self.conv_nets = []
+        self.max_pool1d = []
+        for i in range(num_conv):
+            conv = nn.Conv1d(int(in_channels[i]), int(out_channels[i]), int(kernel_size[i]))
+            self.conv_nets.append(conv)
+
+            max_pool1d = nn.MaxPool1d(pool_sizes[i])
+            self.max_pool1d.append(max_pool1d)
+
+    def forward(self, input):
+        self.conv_nets = [model.cuda() for model in self.conv_nets]
+        conv_out = []
+        input = input.permute(0, 2, 1)
+        for conv in self.conv_nets:
+            conv_out.append(conv(input))
+
+        pooling_out = []
+        for i, pool in enumerate(self.max_pool1d):
+            pooling_out.append(pool(conv_out[i]).squeeze())
+
+        return pooling_out
+
+
+
 

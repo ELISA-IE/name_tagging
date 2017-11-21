@@ -61,8 +61,8 @@ parser.add_argument(
     type=int, help="Char LSTM hidden layer size"
 )
 parser.add_argument(
-    "-b", "--char_bidirect", default="1",
-    type=int, help="Use a bidirectional LSTM for chars"
+    "-V", "--char_conv_channel", default="1",
+    type=int, help="Use CNN to generate character embeddings. (0 to disable)"
 )
 parser.add_argument(
     "-w", "--word_dim", default="100",
@@ -71,10 +71,6 @@ parser.add_argument(
 parser.add_argument(
     "-W", "--word_lstm_dim", default="100",
     type=int, help="Token LSTM hidden layer size"
-)
-parser.add_argument(
-    "-B", "--word_bidirect", default="1",
-    type=int, help="Use a bidirectional LSTM for words"
 )
 parser.add_argument(
     "-p", "--pre_emb", default="",
@@ -91,10 +87,6 @@ parser.add_argument(
 parser.add_argument(
     "-f", "--crf", default="1",
     type=int, help="Use CRF (0 to disable)"
-)
-parser.add_argument(
-    "-V", "--conv", default="1",
-    type=int, help="Use CNN to generate character embeddings. (0 to disable)"
 )
 parser.add_argument(
     "-D", "--dropout", default="0.5",
@@ -116,10 +108,6 @@ parser.add_argument(
     "--batch_size", default="5",
     type=int, help="Batch size."
 )
-parser.add_argument(
-    "--gpu", default="0",
-    type=int, help="Use GPU."
-)
 #
 # external features
 #
@@ -140,7 +128,7 @@ parser.add_argument(
     help="path of pos tagger model."
 )
 parser.add_argument(
-    "--brown_cluster", default="",
+    "--cluster", default="",
     help="path of brown cluster paths."
 )
 parser.add_argument(
@@ -154,6 +142,9 @@ parser.add_argument(
 
 args = parser.parse_args()
 
+# parse model dir
+model_dir = args.model_dp
+
 # Parse parameters
 parameters = OrderedDict()
 parameters['tag_scheme'] = args.tag_scheme
@@ -161,28 +152,35 @@ parameters['lower'] = args.lower == 1
 parameters['zeros'] = args.zeros == 1
 parameters['char_dim'] = args.char_dim
 parameters['char_lstm_dim'] = args.char_lstm_dim
-parameters['char_bidirect'] = args.char_bidirect == 1
+parameters['char_conv_channel'] = args.char_conv_channel
 parameters['word_dim'] = args.word_dim
 parameters['word_lstm_dim'] = args.word_lstm_dim
-parameters['word_bidirect'] = args.word_bidirect == 1
 parameters['pre_emb'] = args.pre_emb
 parameters['all_emb'] = args.all_emb == 1
 parameters['cap_dim'] = args.cap_dim
 parameters['crf'] = args.crf == 1
-parameters['conv'] = args.conv == 1
 parameters['dropout'] = args.dropout
 parameters['lr_method'] = args.lr_method
 parameters['num_epochs'] = args.num_epochs
 parameters['batch_size'] = args.batch_size
-parameters['gpu'] = args.gpu
 # external features
 parameters['feat_dim'] = args.feat_dim
 parameters['comb_method'] = args.comb_method
 parameters['upenn_stem'] = args.upenn_stem
 parameters['pos_model'] = args.pos_model
-parameters['brown_cluster'] = args.brown_cluster
+parameters['cluster'] = args.cluster
 parameters['ying_stem'] = args.ying_stem
 parameters['gaz'] = args.gaz
+
+# generate model name
+model_name = []
+for k, v in parameters.items():
+    if not v:
+        continue
+    if k in ['pre_emb', 'pos_model', 'cluster']:
+        v = os.path.basename(v)
+    model_name.append('='.join((k, str(v))))
+model_dir = os.path.join(model_dir, ','.join(model_name[:-5]))
 
 # Check parameters validity
 assert os.path.isfile(args.train)
@@ -200,15 +198,12 @@ if parameters['upenn_stem']:
 if parameters['pos_model']:
     assert os.path.exists(parameters['pos_model']) and \
            parameters['comb_method'] != 0
-if parameters['brown_cluster']:
-    assert os.path.exists(parameters['brown_cluster']) and \
+if parameters['cluster']:
+    assert os.path.exists(parameters['cluster']) and \
            parameters['comb_method'] != 0
 if parameters['ying_stem']:
     assert os.path.exists(parameters['ying_stem']) and \
            parameters['comb_method'] != 0
-
-# Boliang: use arg model path
-model_dir = args.model_dp
 
 # Check evaluation script / folders
 if not os.path.isfile(eval_script):
@@ -274,12 +269,13 @@ else:
 # Create a dictionary and a mapping for words / POS tags / tags
 dico_chars, char_to_id, id_to_char = char_mapping(train_sentences)
 dico_tags, tag_to_id, id_to_tag = tag_mapping(train_sentences)
+# create a dictionary and a mapping for each feature
+dico_feats_list, feat_to_id_list, id_to_feat_list = feats_mapping(train_feats)
+
 parameters['label_size'] = len(id_to_tag)
 parameters['word_vocab_size'] = len(id_to_word)
 parameters['char_vocab_size'] = len(id_to_char)
-
-# create a dictionary and a mapping for each feature
-dico_feats_list, feat_to_id_list, id_to_feat_list = feats_mapping(train_feats)
+parameters['feat_vocab_size'] = [len(item) for item in id_to_feat_list]
 
 # Index data
 dataset = dict()
@@ -339,7 +335,7 @@ for epoch in range(num_epochs):
     time_epoch_start = time.time()  # epoch start time
 
     # Each epoch has a training and validation phase
-    for phase in ['train', 'dev', 'test'][:2]:
+    for phase in ['train', 'dev', 'test'][:]:
         if phase == 'train':
             optimizer = exp_lr_scheduler(optimizer_ft, epoch,
                                          **lr_method_parameters)
@@ -369,17 +365,6 @@ for epoch in range(num_epochs):
 
                 loss.backward()
 
-                # for p in model.char_lstm.parameters():
-                #     print(p.grad)
-                # for p in model.char_emb.parameters():
-                #     print(p.grad)
-                # for p in model.word_lstm.parameters():
-                #     print(p.grad)
-                # for p in model.word_emb.parameters():
-                #     print(p.grad)
-                # print(model.word_lstm_init_hidden[0].grad)
-                # print(model.word_lstm_init_hidden[0].grad)
-
                 # `clip_grad_norm` helps prevent the exploding gradient problem
                 # in RNNs / LSTMs.
                 torch.nn.utils.clip_grad_norm(model.parameters(), 5)
@@ -407,7 +392,7 @@ for epoch in range(num_epochs):
             epoch_loss = sum(epoch_loss) / len(epoch_loss)
             print('{} Loss: {:.4f}\n'.format(phase, epoch_loss))
         else:
-            epoch_f1, epoch_acc = evaluate(preds, dataset[phase], id_to_tag)
+            epoch_f1, epoch_acc, predicted_bio = evaluate(preds, dataset[phase], id_to_tag)
             if metric == 'f1':
                 epoch_score = epoch_f1
             elif metric == 'acc':
@@ -435,11 +420,15 @@ for epoch in range(num_epochs):
                 'best_prec1': best_dev,
                 'optimizer': optimizer.state_dict(),
             }
-            torch.save(state, os.path.join(model_dir, 'model_best.pth.tar'))
+            torch.save(state, os.path.join(model_dir, 'best_model.pth.tar'))
+            with open(os.path.join(model_dir, 'best_dev.ner.bio'), 'w') as f:
+                f.write(predicted_bio)
 
         if phase == 'test' and epoch_score > best_test:
             best_test = epoch_score
             print('new best score on test: %.4f' % best_test)
+            with open(os.path.join(model_dir, 'best_test.ner.bio'), 'w') as f:
+                f.write(predicted_bio)
 
     time_epoch_end = time.time()  # epoch end time
     print('epoch training time: %f seconds' % round(

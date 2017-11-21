@@ -17,7 +17,7 @@ def generate_features(sentences, parameters):
         feats.append(affix)
     if parameters['pos_model']:
         feats.append(postag_feature(sentences, parameters))
-    if parameters['brown_cluster']:
+    if parameters['cluster']:
         feats.append(clustering_feature(sentences, parameters))
     if parameters['ying_stem']:
         stem = ying_stem_feature(sentences, parameters)
@@ -34,7 +34,7 @@ def generate_features(sentences, parameters):
 #
 def clustering_feature(sentences, parameters):
     def f(x): return x.lower() if parameters['lower'] else x
-    cluster_path_file = parameters['brown_cluster']
+    cluster_path_file = parameters['cluster']
     #
     # parse cluster path
     #

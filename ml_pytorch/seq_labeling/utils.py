@@ -229,9 +229,17 @@ def pad_word(inputs, seq_len):
     # get the max sequence length in the batch
     max_len = seq_len[0]
 
+    # padded_inputs = []
+    # for item in inputs:
+    #     padded_inputs.append(item + [0] * (max_len - len(item)))
+    #
+    # return padded_inputs
+
+    padding = np.zeros_like([inputs[0][0]]).tolist()
+
     padded_inputs = []
     for item in inputs:
-        padded_inputs.append(item + [0] * (max_len - len(item)))
+        padded_inputs.append(item + padding * (max_len - len(item)))
 
     return padded_inputs
 
@@ -249,6 +257,11 @@ def pad_chars(inputs):
     char_len = [len(c) for c in chars]
 
     chars = pad_word(chars, char_len)
+
+    # pad chars to length of 25 if max char len less than 25
+    # char CNN layer requires at least 25 chars
+    if len(chars[0]) < 25:
+        chars = [c + [0]*(25-len(c)) for c in chars]
 
     return chars, char_index_mapping, char_len
 
@@ -284,12 +297,12 @@ def create_input(data, parameters, add_label=True):
 
         # boliang: add expectation features into input
         if parameters['feat_dim']:
-            feat_len = len(d['feats'][0])  # get expectation feature length
-            feats = []
-            for i in range(feat_len):
-                input_feats = [token_feats[i] for token_feats in d['feats']]
-                feats.append(input_feats)
-                inputs['feats'].append(feats)
+            # feat_len = len(d['feats'][0])  # get expectation feature length
+            # feats = []
+            # for i in range(feat_len):
+            #     input_feats = [token_feats[i] for token_feats in d['feats']]
+            #     feats.append(input_feats)
+            inputs['feats'].append(d['feats'])
 
         # boliang: add numeric features into input
         # if parameters['numeric_feat_dim']:
@@ -383,7 +396,7 @@ def evaluate(preds, dataset, id_to_tag, eval_out_dir=None):
     # find all float numbers in string
     acc, precision, recall, f1 = re.findall("\d+\.\d+", eval_lines[1])
 
-    return float(f1), float(acc)
+    return float(f1), float(acc), "\n".join(predictions)
 
 
 # def evaluate(parameters, f_eval, raw_sentences, parsed_sentences,
