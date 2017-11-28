@@ -1,14 +1,14 @@
 import argparse
 import time
 import torch
-from ml_pytorch import gpu
+from dnn_pytorch import gpu
 
-from ml_pytorch.seq_labeling.nn import SeqLabeling
-from ml_pytorch.seq_labeling.utils import create_input, iobes_iob
-from ml_pytorch.seq_labeling.loader import prepare_dataset, load_sentences
+from dnn_pytorch.seq_labeling.nn import SeqLabeling
+from dnn_pytorch.seq_labeling.utils import create_input, iobes_iob
+from dnn_pytorch.seq_labeling.loader import prepare_dataset, load_sentences
 
 # external features
-from ml_pytorch.seq_labeling.generate_features import generate_features
+from dnn_pytorch.seq_labeling.generate_features import generate_features
 
 
 # Read parameters from command line

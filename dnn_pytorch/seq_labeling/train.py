@@ -11,15 +11,15 @@ from torch.autograd import Variable
 import torch.optim as optim
 from collections import OrderedDict
 
-from ml_pytorch.seq_labeling.nn import SeqLabeling
-from ml_pytorch.seq_labeling.utils import create_input, Tee
-from ml_pytorch.seq_labeling.utils import evaluate, eval_script
-from ml_pytorch.seq_labeling.loader import word_mapping, char_mapping, tag_mapping, feats_mapping
-from ml_pytorch.seq_labeling.loader import update_tag_scheme, prepare_dataset, load_sentences
-from ml_pytorch.seq_labeling.loader import augment_with_pretrained
+from dnn_pytorch.seq_labeling.nn import SeqLabeling
+from dnn_pytorch.seq_labeling.utils import create_input, Tee
+from dnn_pytorch.seq_labeling.utils import evaluate, eval_script
+from dnn_pytorch.seq_labeling.loader import word_mapping, char_mapping, tag_mapping, feats_mapping
+from dnn_pytorch.seq_labeling.loader import update_tag_scheme, prepare_dataset, load_sentences
+from dnn_pytorch.seq_labeling.loader import augment_with_pretrained
 # external features
-from ml_pytorch.seq_labeling.generate_features import generate_features
-from ml_pytorch.ml_utils import exp_lr_scheduler
+from dnn_pytorch.seq_labeling.generate_features import generate_features
+from dnn_pytorch.dnn_utils import exp_lr_scheduler
 
 
 # Read parameters from command line
@@ -116,10 +116,6 @@ parser.add_argument(
     type=int, help="dimension for each feature."
 )
 parser.add_argument(
-    "--comb_method", default="0",
-    type=int, help="combination method. (1, 2, 3 or 4)"
-)
-parser.add_argument(
     "--upenn_stem", default="",
     help="path of upenn morphology analysis result."
 )
@@ -165,7 +161,6 @@ parameters['num_epochs'] = args.num_epochs
 parameters['batch_size'] = args.batch_size
 # external features
 parameters['feat_dim'] = args.feat_dim
-parameters['comb_method'] = args.comb_method
 parameters['upenn_stem'] = args.upenn_stem
 parameters['pos_model'] = args.pos_model
 parameters['cluster'] = args.cluster
@@ -193,17 +188,13 @@ assert not parameters['all_emb'] or parameters['pre_emb']
 assert not parameters['pre_emb'] or parameters['word_dim'] > 0
 assert not parameters['pre_emb'] or os.path.isfile(parameters['pre_emb'])
 if parameters['upenn_stem']:
-    assert os.path.exists(parameters['upenn_stem']) and \
-           parameters['comb_method'] != 0
+    assert os.path.exists(parameters['upenn_stem'])
 if parameters['pos_model']:
-    assert os.path.exists(parameters['pos_model']) and \
-           parameters['comb_method'] != 0
+    assert os.path.exists(parameters['pos_model'])
 if parameters['cluster']:
-    assert os.path.exists(parameters['cluster']) and \
-           parameters['comb_method'] != 0
+    assert os.path.exists(parameters['cluster'])
 if parameters['ying_stem']:
-    assert os.path.exists(parameters['ying_stem']) and \
-           parameters['comb_method'] != 0
+    assert os.path.exists(parameters['ying_stem'])
 
 # Check evaluation script / folders
 if not os.path.isfile(eval_script):

@@ -1,8 +1,8 @@
 .idea/
 **/.DS_Store
 example/
-ml_pytorch/seq_labeling/evaluation/tmp
-ml_pytorch/runs
+dnn_pytorch/seq_labeling/evaluation/tmp
+dnn_pytorch/runs
 
 
 # Created by .ignore support plugin (hsz.mobi)

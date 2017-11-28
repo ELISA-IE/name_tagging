@@ -4,9 +4,9 @@ import torch.nn as nn
 import numpy as np
 from torch.autograd import Variable
 from torch.nn.parameter import Parameter
-from ml_pytorch.seq_labeling.loader import load_embedding
-from ml_pytorch.ml_utils import init_param, init_variable, log_sum_exp, sequence_mask
-from ml_pytorch import LongTensor, FloatTensor
+from dnn_pytorch.seq_labeling.loader import load_embedding
+from dnn_pytorch.dnn_utils import init_param, init_variable, log_sum_exp, sequence_mask
+from dnn_pytorch import LongTensor, FloatTensor
 
 
 class SeqLabeling(nn.Module):
@@ -551,9 +551,10 @@ class MultiLeNetConv1dLayer(nn.Module):
 
             max_pool1d = nn.MaxPool1d(pool_sizes[i])
             self.max_pool1d.append(max_pool1d)
+        self.conv_nets = nn.ModuleList(self.conv_nets)
+        self.max_pool1d = nn.ModuleList(self.max_pool1d)
 
     def forward(self, input):
-        self.conv_nets = [model.cuda() for model in self.conv_nets]
         conv_out = []
         input = input.permute(0, 2, 1)
         for conv in self.conv_nets:

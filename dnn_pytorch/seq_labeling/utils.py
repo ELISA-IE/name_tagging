@@ -10,7 +10,7 @@ import theano
 import torch
 import collections
 from torch.autograd import Variable
-from ml_pytorch import LongTensor
+from dnn_pytorch import LongTensor
 
 try:
     import _pickle as cPickle

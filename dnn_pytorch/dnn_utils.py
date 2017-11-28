@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from ml_pytorch import FloatTensor
+from dnn_pytorch import FloatTensor
 
 
 def exp_lr_scheduler(optimizer, epoch, init_lr=0.01, lr_decay_epoch=7):
