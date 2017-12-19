@@ -79,9 +79,11 @@ class SeqLabeling(nn.Module):
         #
         # feat dim
         #
-        if feat_dim:
+        if feat_vocab_size:
             self.feat_emb = [nn.Embedding(v, feat_dim) for v in feat_vocab_size]
             word_lstm_input_dim += len(self.feat_emb) * feat_dim
+        else:
+            self.feat_emb = []
 
         #
         # dropout for word bi-lstm layer
@@ -136,7 +138,7 @@ class SeqLabeling(nn.Module):
             self.char_lstm.flatten_parameters()
         if self.model_param['char_conv_channel']:
             init_param(self.multi_convs)
-        if self.model_param['feat_dim']:
+        if self.feat_emb:
             for f_e in self.feat_emb:
                 init_param(f_e)
 
@@ -249,8 +251,8 @@ class SeqLabeling(nn.Module):
         # char CNN embeddings
         #
         if self.model_param['char_conv_channel']:
-            lstm_cnn_emb = char_emb[:, :25]
-            char_cnn_out = self.multi_convs(lstm_cnn_emb)
+            cnn_char_emb = char_emb[:, :25]
+            char_cnn_out = self.multi_convs(cnn_char_emb)
             char_repr += char_cnn_out
 
         if char_repr:
@@ -268,7 +270,7 @@ class SeqLabeling(nn.Module):
         #
         # feat input
         #
-        if self.model_param['feat_dim']:
+        if self.feat_emb:
             feat_emb = []
             for i, f_e in enumerate(self.feat_emb):
                 feat = inputs['feats'][:, :, i]

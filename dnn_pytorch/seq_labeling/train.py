@@ -2,12 +2,10 @@ import os
 import sys
 import argparse
 import time
-import timeit
 import random
 import torch
 import itertools
 import numpy as np
-from torch.autograd import Variable
 import torch.optim as optim
 from collections import OrderedDict
 
@@ -17,87 +15,95 @@ from dnn_pytorch.seq_labeling.utils import evaluate, eval_script
 from dnn_pytorch.seq_labeling.loader import word_mapping, char_mapping, tag_mapping, feats_mapping
 from dnn_pytorch.seq_labeling.loader import update_tag_scheme, prepare_dataset, load_sentences
 from dnn_pytorch.seq_labeling.loader import augment_with_pretrained
-# external features
-from dnn_pytorch.seq_labeling.generate_features import generate_features
 from dnn_pytorch.dnn_utils import exp_lr_scheduler
 
 
 # Read parameters from command line
 parser = argparse.ArgumentParser()
 parser.add_argument(
-    "-T", "--train", default="",
+    "--train", default="",
     help="Train set location"
 )
 parser.add_argument(
-    "-d", "--dev", default="",
+    "--dev", default="",
     help="Dev set location"
 )
 parser.add_argument(
-    "-t", "--test", default="",
+    "--test", default="",
     help="Test set location"
 )
 parser.add_argument(
-    "-m", "--model_dp", default="",
+    "--model_dp", default="",
     help="model directory path"
 )
 parser.add_argument(
-    "-s", "--tag_scheme", default="iobes",
+    "--tag_scheme", default="iobes",
     help="Tagging scheme (IOB or IOBES)"
 )
 parser.add_argument(
-    "-l", "--lower", default='0',
+    "--lower", default='0',
     type=int, help="Lowercase words (this will not affect character inputs)"
 )
 parser.add_argument(
-    "-z", "--zeros", default="0",
+    "--zeros", default="0",
     type=int, help="Replace digits with 0"
 )
 parser.add_argument(
-    "-c", "--char_dim", default="25",
+    "--char_dim", default="25",
     type=int, help="Char embedding dimension"
 )
 parser.add_argument(
-    "-C", "--char_lstm_dim", default="25",
+    "--char_lstm_dim", default="25",
     type=int, help="Char LSTM hidden layer size"
 )
 parser.add_argument(
-    "-V", "--char_conv_channel", default="1",
+    "--char_conv_channel", default="1",
     type=int, help="Use CNN to generate character embeddings. (0 to disable)"
 )
 parser.add_argument(
-    "-w", "--word_dim", default="100",
+    "--word_dim", default="100",
     type=int, help="Token embedding dimension"
 )
 parser.add_argument(
-    "-W", "--word_lstm_dim", default="100",
+    "--word_lstm_dim", default="100",
     type=int, help="Token LSTM hidden layer size"
 )
 parser.add_argument(
-    "-p", "--pre_emb", default="",
+    "--pre_emb", default="",
     help="Location of pretrained embeddings"
 )
 parser.add_argument(
-    "-A", "--all_emb", default="0",
+    "--all_emb", default="0",
     type=int, help="Load all embeddings"
 )
 parser.add_argument(
-    "-a", "--cap_dim", default="0",
+    "--cap_dim", default="0",
     type=int, help="Capitalization feature dimension (0 to disable)"
 )
 parser.add_argument(
-    "-f", "--crf", default="1",
+    "--feat_dim", default="5",
+    type=int, help="dimension for each feature."
+)
+parser.add_argument(
+    '--feat_column',
+    type=int, default=1,
+    help='the number of the column where the features start. default is 1, '
+         'the 2nd column.'
+)
+parser.add_argument(
+    "--crf", default="1",
     type=int, help="Use CRF (0 to disable)"
 )
 parser.add_argument(
-    "-D", "--dropout", default="0.5",
+    "--dropout", default="0.5",
     type=float, help="Droupout on the input (0 = no dropout)"
 )
 parser.add_argument(
-    "-L", "--lr_method", default="sgd-lr_.005",
+    "--lr_method", default="sgd-lr_.005",
     help="Learning method (SGD, Adadelta, Adam..)"
 )
 parser.add_argument(
-    "-r", "--reload", default="0",
+    "--reload", default="0",
     type=int, help="Reload the last saved model"
 )
 parser.add_argument(
@@ -108,33 +114,11 @@ parser.add_argument(
     "--batch_size", default="5",
     type=int, help="Batch size."
 )
-#
-# external features
-#
 parser.add_argument(
-    "--feat_dim", default="0",
-    type=int, help="dimension for each feature."
+    "--gpu", default="0",
+    type=int, help="default is 0. set 1 to use gpu."
 )
-parser.add_argument(
-    "--upenn_stem", default="",
-    help="path of upenn morphology analysis result."
-)
-parser.add_argument(
-    "--pos_model", default="",
-    help="path of pos tagger model."
-)
-parser.add_argument(
-    "--cluster", default="",
-    help="path of brown cluster paths."
-)
-parser.add_argument(
-    "--ying_stem", default="",
-    help="path of Ying's stemming result."
-)
-parser.add_argument(
-    "--gaz", default="", nargs="+",
-    help="gazetteers paths."
-)
+
 
 args = parser.parse_args()
 
@@ -154,25 +138,20 @@ parameters['word_lstm_dim'] = args.word_lstm_dim
 parameters['pre_emb'] = args.pre_emb
 parameters['all_emb'] = args.all_emb == 1
 parameters['cap_dim'] = args.cap_dim
+parameters['feat_dim'] = args.feat_dim
+parameters['feat_column'] = args.feat_column
 parameters['crf'] = args.crf == 1
 parameters['dropout'] = args.dropout
 parameters['lr_method'] = args.lr_method
 parameters['num_epochs'] = args.num_epochs
 parameters['batch_size'] = args.batch_size
-# external features
-parameters['feat_dim'] = args.feat_dim
-parameters['upenn_stem'] = args.upenn_stem
-parameters['pos_model'] = args.pos_model
-parameters['cluster'] = args.cluster
-parameters['ying_stem'] = args.ying_stem
-parameters['gaz'] = args.gaz
 
 # generate model name
 model_name = []
 for k, v in parameters.items():
     if not v:
         continue
-    if k in ['pre_emb', 'pos_model', 'cluster']:
+    if k == 'pre_emb':
         v = os.path.basename(v)
     model_name.append('='.join((k, str(v))))
 model_dir = os.path.join(model_dir, ','.join(model_name[:-5]))
@@ -181,20 +160,12 @@ model_dir = os.path.join(model_dir, ','.join(model_name[:-5]))
 assert os.path.isfile(args.train)
 assert os.path.isfile(args.dev)
 assert os.path.isfile(args.test)
-assert parameters['char_dim'] > 0 or parameters['word_dim'] > 0 or parameters['exp_feat_dim'] > 0
+assert parameters['char_dim'] > 0 or parameters['word_dim'] > 0
 assert 0. <= parameters['dropout'] < 1.0
 assert parameters['tag_scheme'] in ['iob', 'iobes', 'classification']
 assert not parameters['all_emb'] or parameters['pre_emb']
 assert not parameters['pre_emb'] or parameters['word_dim'] > 0
 assert not parameters['pre_emb'] or os.path.isfile(parameters['pre_emb'])
-if parameters['upenn_stem']:
-    assert os.path.exists(parameters['upenn_stem'])
-if parameters['pos_model']:
-    assert os.path.exists(parameters['pos_model'])
-if parameters['cluster']:
-    assert os.path.exists(parameters['cluster'])
-if parameters['ying_stem']:
-    assert os.path.exists(parameters['ying_stem'])
 
 # Check evaluation script / folders
 if not os.path.isfile(eval_script):
@@ -235,13 +206,6 @@ update_tag_scheme(train_sentences, tag_scheme)
 update_tag_scheme(dev_sentences, tag_scheme)
 update_tag_scheme(test_sentences, tag_scheme)
 
-#
-# generate external features
-#
-train_feats, train_stem = generate_features(train_sentences, parameters)
-dev_feats, dev_stem = generate_features(dev_sentences, parameters)
-test_feats, test_stem = generate_features(test_sentences, parameters)
-
 # Create a dictionary / mapping of words
 # If we use pretrained embeddings, we add them to the dictionary.
 if parameters['pre_emb']:
@@ -261,7 +225,9 @@ else:
 dico_chars, char_to_id, id_to_char = char_mapping(train_sentences)
 dico_tags, tag_to_id, id_to_tag = tag_mapping(train_sentences)
 # create a dictionary and a mapping for each feature
-dico_feats_list, feat_to_id_list, id_to_feat_list = feats_mapping(train_feats)
+dico_feats_list, feat_to_id_list, id_to_feat_list = feats_mapping(
+    train_sentences, parameters['feat_column']
+)
 
 parameters['label_size'] = len(id_to_tag)
 parameters['word_vocab_size'] = len(id_to_word)
@@ -271,18 +237,15 @@ parameters['feat_vocab_size'] = [len(item) for item in id_to_feat_list]
 # Index data
 dataset = dict()
 dataset['train'] = prepare_dataset(
-    train_sentences,
-    train_feats, train_stem,
+    train_sentences, parameters['feat_column'],
     word_to_id, char_to_id, tag_to_id, feat_to_id_list, lower
 )
 dataset['dev'] = prepare_dataset(
-    dev_sentences,
-    dev_feats, dev_stem,
+    dev_sentences, parameters['feat_column'],
     word_to_id, char_to_id, tag_to_id, feat_to_id_list, lower
 )
 dataset['test'] = prepare_dataset(
-    test_sentences,
-    test_feats, test_stem,
+    test_sentences, parameters['feat_column'],
     word_to_id, char_to_id, tag_to_id, feat_to_id_list, lower
 )
 

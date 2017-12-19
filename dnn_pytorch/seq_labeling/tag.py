@@ -1,7 +1,6 @@
 import argparse
 import time
 import torch
-from dnn_pytorch import gpu
 
 from dnn_pytorch.seq_labeling.nn import SeqLabeling
 from dnn_pytorch.seq_labeling.utils import create_input, iobes_iob
@@ -13,7 +12,6 @@ from dnn_pytorch.seq_labeling.generate_features import generate_features
 
 # Read parameters from command line
 parser = argparse.ArgumentParser()
-
 parser.add_argument(
     "-m", "--model", default="",
     help="Model location"
@@ -26,11 +24,14 @@ parser.add_argument(
     "-o", "--output", default="",
     help="Output bio file location"
 )
-
+parser.add_argument(
+    "--gpu", default="0",
+    type=int, help="default is 0. set 1 to use gpu."
+)
 args = parser.parse_args()
 
 print('loading model from:', args.model)
-if gpu:
+if args.gpu:
     state = torch.load(args.model)
 else:
     state = torch.load(args.model, map_location=lambda storage, loc: storage)

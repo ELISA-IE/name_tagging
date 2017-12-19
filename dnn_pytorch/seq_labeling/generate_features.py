@@ -4,6 +4,9 @@ import tempfile
 import subprocess
 import itertools
 import collections
+import argparse
+import shutil
+from dnn_pytorch.seq_labeling.loader import load_sentences
 
 
 #
@@ -447,3 +450,71 @@ def merge_features(sent_features):
             merged_sent_f.append(merged_t_feat)
         res.append(merged_sent_f)
     return res
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('bio_input',
+                        help='bio file that needs to generate features')
+    parser.add_argument('bio_output',
+                        help='path of the result')
+    parser.add_argument('--feat_column', type=int, default=1,
+                        help='the number of the column where the features '
+                             'start. default is 1, the 2nd column.')
+    parser.add_argument(
+        "--lower", default='0',
+        type=int, help="Lowercase words"
+    )
+    #
+    # external features
+    #
+    parser.add_argument(
+        "--upenn_stem", default="",
+        help="path of upenn morphology analysis result."
+    )
+    parser.add_argument(
+        "--pos_model", default="",
+        help="path of pos tagger model."
+    )
+    parser.add_argument(
+        "--cluster", default="",
+        help="path of brown cluster paths."
+    )
+    parser.add_argument(
+        "--ying_stem", default="",
+        help="path of Ying's stemming result."
+    )
+    parser.add_argument(
+        "--gaz", default="", nargs="+",
+        help="gazetteers paths."
+    )
+    args = parser.parse_args()
+
+    # external features
+    parameters = dict()
+    parameters['lower'] = args.lower == 1
+    parameters['upenn_stem'] = args.upenn_stem
+    parameters['pos_model'] = args.pos_model
+    parameters['cluster'] = args.cluster
+    parameters['ying_stem'] = args.ying_stem
+    parameters['gaz'] = args.gaz
+
+    sentences = load_sentences(args.bio_input)
+
+    feats, stem = generate_features(sentences, parameters)
+
+    # output bio with features
+    if feats:
+        bio = []
+        for i, s in enumerate(sentences):
+            bio_s = []
+            for j, w in enumerate(s):
+                bio_s.append(' '.join(w[:args.feat_column] + feats[i][j] +
+                                      w[args.feat_column:]))
+            bio.append('\n'.join(bio_s))
+        with open(args.bio_output, 'w') as f:
+            f.write('\n\n'.join(bio))
+    else:
+        shutil.copy(args.bio_input, args.bio_output)
+
+

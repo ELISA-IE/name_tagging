@@ -1,13 +1,9 @@
 import os
 import re
 import io
-import sys
-import shutil
 import itertools
 import codecs
 import numpy as np
-import theano
-import torch
 import collections
 from torch.autograd import Variable
 from dnn_pytorch import LongTensor
@@ -21,53 +17,6 @@ models_path = "./models"
 eval_path = os.path.join(os.path.dirname(__file__), "./evaluation")
 eval_temp = os.path.join(eval_path, "temp")
 eval_script = os.path.join(eval_path, "conlleval")
-
-
-def get_name(parameters):
-    """
-    Generate a model name from its parameters.
-    """
-    l = []
-    for k, v in parameters.items():
-        if type(v) is str and "/" in v:
-            v = v[::-1][:v[::-1].index('/')][::-1]
-            if len(v) > 10:
-                v = 'long_path'
-            l.append((k, v))
-        elif type(v) is list:
-            l.append((k, 'long_path'))
-        else:
-            l.append((k, v))
-    name = ",".join(["%s=%s" % (k, str(v).replace(',', '')) for k, v in l])
-    return "".join(i for i in name if i not in "\/:*?<>|")
-
-
-def set_values(name, param, pretrained):
-    """
-    Initialize a network parameter with pretrained values.
-    We check that sizes are compatible.
-    """
-    param_value = param.get_value()
-    if pretrained.size != param_value.size:
-        raise Exception(
-            "Size mismatch for parameter %s. Expected %i, found %i."
-            % (name, param_value.size, pretrained.size)
-        )
-    param.set_value(np.reshape(
-        pretrained, param_value.shape
-    ).astype(np.float32))
-
-
-def shared(shape, name):
-    """
-    Create a shared object of a numpy array.
-    """
-    if len(shape) == 1:
-        value = np.zeros(shape)  # bias are initialized with zeros
-    else:
-        drange = np.sqrt(6. / (np.sum(shape)))
-        value = drange * np.random.uniform(low=-1.0, high=1.0, size=shape)
-    return theano.shared(value=value.astype(theano.config.floatX), name=name)
 
 
 def create_dico(item_list):
@@ -184,56 +133,9 @@ def insert_singletons(words, singletons, p=0.5):
     return new_words
 
 
-def pad_word_chars(words):
-    """
-    Pad the characters of the words in a sentence.
-    Input:
-        - list of lists of ints (list of words, a word being a list of char indexes)
-    Output:
-        - padded list of lists of ints
-        - padded list of lists of ints (where chars are reversed)
-        - list of ints corresponding to the index of the last character of each word
-    """
-    # max_length = max([len(word) for word in words])
-    # char_for = []
-    # char_rev = []
-    # char_len = []
-    # for word in words:
-    #     padding = [0] * (max_length - len(word))
-    #     char_for.append(word + padding)
-    #     char_rev.append(word[::-1] + padding)
-    #     char_len.append(len(word) - 1)
-    # return char_for, char_rev, char_len
-
-    max_length = 25
-    char_for = []
-    char_rev = []
-    char_len = []
-    for word in words:
-        if len(word) >= max_length:
-            # print("exceed the max length ... ", len(word))
-            word = word[:max_length]
-            char_for.append(word)
-            char_rev.append(word[::-1])
-            char_len.append(len(word) - 1)
-        else:
-            padding_left = [0]
-            padding = [0] * (max_length - 1 - len(word))
-            char_for.append(padding_left + word + padding)
-            char_rev.append(padding_left + word[::-1] + padding)
-            char_len.append(len(word))
-    return char_for, char_rev, char_len
-
-
 def pad_word(inputs, seq_len):
     # get the max sequence length in the batch
     max_len = seq_len[0]
-
-    # padded_inputs = []
-    # for item in inputs:
-    #     padded_inputs.append(item + [0] * (max_len - len(item)))
-    #
-    # return padded_inputs
 
     padding = np.zeros_like([inputs[0][0]]).tolist()
 
@@ -271,7 +173,7 @@ def create_input(data, parameters, add_label=True):
     Take sentence data and return an input for
     the training or the evaluation function.
     """
-    # sort data by sequence lenght
+    # sort data by sequence length
     seq_index_mapping, data = zip(*[item for item in sorted(enumerate(data), key=lambda x: len(x[1]['words']), reverse=True)])
     seq_index_mapping = {v: i for i, v in enumerate(seq_index_mapping)}
 
@@ -282,13 +184,10 @@ def create_input(data, parameters, add_label=True):
         words = d['words']
         seq_len.append(len(words))
 
-        stems = d['stems']
         chars = d['chars']
 
         if parameters['word_dim']:
             inputs['words'].append(words)
-        if stems:
-            inputs['stems'].append(stems)
         if parameters['char_dim']:
             inputs['chars'].append(chars)
         if parameters['cap_dim']:
@@ -296,17 +195,8 @@ def create_input(data, parameters, add_label=True):
             inputs['caps'].append(caps)
 
         # boliang: add expectation features into input
-        if parameters['feat_dim']:
-            # feat_len = len(d['feats'][0])  # get expectation feature length
-            # feats = []
-            # for i in range(feat_len):
-            #     input_feats = [token_feats[i] for token_feats in d['feats']]
-            #     feats.append(input_feats)
+        if d['feats']:
             inputs['feats'].append(d['feats'])
-
-        # boliang: add numeric features into input
-        # if parameters['numeric_feat_dim']:
-        #     input.append(d['numeric_feats'])
 
         if add_label:
             tags = d['tags']
@@ -323,13 +213,6 @@ def create_input(data, parameters, add_label=True):
 
     # convert inputs and labels to Variable
     for k, v in inputs.items():
-        # if k == 'words':
-        #     v = Variable(LongTensor(v))
-        # elif k == 'tags':
-        #     v = Variable(LongTensor(v))
-        # else:
-        #     continue
-
         inputs[k] = Variable(LongTensor(v))
 
     return inputs, seq_index_mapping, char_index_mapping, seq_len, char_len
@@ -399,83 +282,6 @@ def evaluate(preds, dataset, id_to_tag, eval_out_dir=None):
     return float(f1), float(acc), "\n".join(predictions)
 
 
-# def evaluate(parameters, f_eval, raw_sentences, parsed_sentences,
-#              id_to_tag, dictionary_tags, eval_out_dir=None):
-#     """
-#     Evaluate current model using CoNLL script.
-#     """
-#
-#     n_tags = len(id_to_tag)
-#     predictions = []
-#     count = np.zeros((n_tags, n_tags), dtype=np.int32)
-#
-#     for raw_sentence, data in zip(raw_sentences, parsed_sentences):
-#         input = create_input(data, parameters, False)
-#         if parameters['crf']:
-#             y_preds = np.array(f_eval(*input))[1:-1]
-#         else:
-#             y_preds = f_eval(*input).argmax(axis=1)
-#         y_reals = np.array(data['tags']).astype(np.int32)
-#         assert len(y_preds) == len(y_reals)
-#         p_tags = [id_to_tag[y_pred] for y_pred in y_preds]
-#         r_tags = [id_to_tag[y_real] for y_real in y_reals]
-#         if parameters['tag_scheme'] == 'iobes':
-#             p_tags = iobes_iob(p_tags)
-#             r_tags = iobes_iob(r_tags)
-#         for i, (y_pred, y_real) in enumerate(zip(y_preds, y_reals)):
-#             new_line = " ".join(raw_sentence[i][:-1] + [r_tags[i], p_tags[i]])
-#             predictions.append(new_line)
-#             count[y_real, y_pred] += 1
-#         predictions.append("")
-#
-#     # Write predictions to disk and run CoNLL script externally
-#     eval_id = np.random.randint(1000000, 2000000)
-#     if eval_out_dir:
-#         eval_temp = eval_out_dir
-#     output_path = os.path.join(eval_temp, "eval.%i.output" % eval_id)
-#     scores_path = os.path.join(eval_temp, "eval.%i.scores" % eval_id)
-#     with codecs.open(output_path, 'w', 'utf8') as f:
-#         f.write("\n".join(predictions))
-#     os.system("%s < %s > %s" % (eval_script, output_path, scores_path))
-#
-#     # CoNLL evaluation results
-#     eval_lines = [l.rstrip() for l in codecs.open(scores_path, 'r', 'utf8')]
-#     for line in eval_lines:
-#         print(line)
-#
-#     # Remove temp files
-#     # os.remove(output_path)
-#     # os.remove(scores_path)
-#
-#     # Confusion matrix with accuracy for each tag
-#     # print(("{: >2}{: >7}{: >7}%s{: >9}" % ("{: >7}" * n_tags)).format(
-#     #     "ID", "NE", "Total",
-#     #     *([id_to_tag[i] for i in range(n_tags)] + ["Percent"])
-#     # ))
-#     # for i in range(n_tags):
-#     #     print(("{: >2}{: >7}{: >7}%s{: >9}" % ("{: >7}" * n_tags)).format(
-#     #         str(i), id_to_tag[i], str(count[i].sum()),
-#     #         *([count[i][j] for j in range(n_tags)] +
-#     #           ["%.3f" % (count[i][i] * 100. / max(1, count[i].sum()))])
-#     #     ))
-#
-#     # Global accuracy
-#     print("%i/%i (%.5f%%)" % (
-#         count.trace(), count.sum(), 100. * count.trace() / max(1, count.sum())
-#     ))
-#
-#     # F1 on all entities
-#     # print(eval_lines)
-#
-#     # find all float numbers in string
-#     acc, precision, recall, f1 = re.findall("\d+\.\d+", eval_lines[1])
-#
-#     return float(f1), float(acc)
-
-
-
-
-
 ########################################################################################################################
 # temporal script below
 #
@@ -490,6 +296,20 @@ def load_exp_feats(fp):
         res.append(sent_feats)
 
     return res
+
+
+class Tee(object):
+    def __init__(self, *files):
+        self.files = files
+
+    def write(self, obj):
+        for f in self.files:
+            f.write(obj)
+            f.flush() # If you want the output to be visible immediately
+
+    def flush(self) :
+        for f in self.files:
+            f.flush()
 
 
 if __name__ == "__main__":
@@ -511,33 +331,3 @@ if __name__ == "__main__":
     cPickle.dump(test_exp_feats, open('test_exp_feats.pkl', 'wb'))
 
 
-class Tee(object):
-    def __init__(self, *files):
-        self.files = files
-
-    def write(self, obj):
-        for f in self.files:
-            f.write(obj)
-            f.flush() # If you want the output to be visible immediately
-
-    def flush(self) :
-        for f in self.files:
-            f.flush()
-
-
-def save_mappings(mappings_path, id_to_word, id_to_char, id_to_tag, id_to_feat_list):
-    """
-    We need to save the mappings if we want to use the model later.
-    """
-    self.id_to_word = id_to_word
-    self.id_to_char = id_to_char
-    self.id_to_tag = id_to_tag
-    self.id_to_feat_list = id_to_feat_list  # boliang
-    with open(self.mappings_path, 'wb') as f:
-        mappings = {
-            'id_to_word': self.id_to_word,
-            'id_to_char': self.id_to_char,
-            'id_to_tag': self.id_to_tag,
-            'id_to_feat_list': self.id_to_feat_list  # boliang
-        }
-        cPickle.dump(mappings, f)
