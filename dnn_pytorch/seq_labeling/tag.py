@@ -6,23 +6,24 @@ from dnn_pytorch.seq_labeling.nn import SeqLabeling
 from dnn_pytorch.seq_labeling.utils import create_input, iobes_iob
 from dnn_pytorch.seq_labeling.loader import prepare_dataset, load_sentences
 
-# external features
-from dnn_pytorch.seq_labeling.generate_features import generate_features
-
 
 # Read parameters from command line
 parser = argparse.ArgumentParser()
 parser.add_argument(
-    "-m", "--model", default="",
+    "--model", default="",
     help="Model location"
 )
 parser.add_argument(
-    "-i", "--input", default="",
+    "--input", default="",
     help="Input bio file location"
 )
 parser.add_argument(
-    "-o", "--output", default="",
+    "--output", default="",
     help="Output bio file location"
+)
+parser.add_argument(
+    "--batch_size", default="50",
+    type=int, help="batch size"
 )
 parser.add_argument(
     "--gpu", default="0",
@@ -50,15 +51,14 @@ feat_to_id_list = [
     ]
 
 # eval sentences
-eval_sentences = load_sentences(args.input,
-                                parameters['lower'],
-                                parameters['zeros'])
-
-eval_feats, eval_stem = generate_features(eval_sentences, parameters)
+eval_sentences = load_sentences(
+    args.input,
+    parameters['lower'],
+    parameters['zeros']
+)
 
 eval_dataset = prepare_dataset(
-    eval_sentences,
-    eval_feats, eval_stem,
+    eval_sentences, parameters['feat_column'],
     word_to_id, char_to_id, tag_to_id, feat_to_id_list, parameters['lower'],
     is_train=False
 )
@@ -71,13 +71,14 @@ model.load_state_dict(state['state_dict'])
 model.train(False)
 
 since = time.time()
-batch_size = 100
+batch_size = args.batch_size
 f_output = open(args.output, 'w')
 
 # Iterate over data.
 print('tagging...')
 for i in range(0, len(eval_dataset), batch_size):
-    inputs, seq_index_mapping, char_index_mapping, seq_len, char_len = create_input(eval_dataset[i:i+batch_size], parameters)
+    inputs, seq_index_mapping, char_index_mapping, seq_len, char_len = \
+        create_input(eval_dataset[i:i+batch_size], parameters, add_label=False)
 
     # forward
     outputs, loss = model.forward(inputs, seq_len, char_len, char_index_mapping)

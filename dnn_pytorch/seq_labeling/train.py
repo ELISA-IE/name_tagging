@@ -87,7 +87,7 @@ parser.add_argument(
 parser.add_argument(
     '--feat_column',
     type=int, default=1,
-    help='the number of the column where the features start. default is 1, '
+    help='the number of the column where features start. default is 1, '
          'the 2nd column.'
 )
 parser.add_argument(
@@ -154,7 +154,7 @@ for k, v in parameters.items():
     if k == 'pre_emb':
         v = os.path.basename(v)
     model_name.append('='.join((k, str(v))))
-model_dir = os.path.join(model_dir, ','.join(model_name[:-5]))
+model_dir = os.path.join(model_dir, ','.join(model_name[:]))
 
 # Check parameters validity
 assert os.path.isfile(args.train)
@@ -303,7 +303,8 @@ for epoch in range(num_epochs):
         # Iterate over data.
         preds = []
         for i in range(0, len(dataset[phase]), batch_size):
-            inputs, seq_index_mapping, char_index_mapping, seq_len, char_len = create_input(dataset[phase][i:i+batch_size], parameters)
+            inputs, seq_index_mapping, char_index_mapping, seq_len, char_len = \
+                create_input(dataset[phase][i:i+batch_size], parameters)
 
             # forward
             outputs, loss = model.forward(inputs, seq_len, char_len, char_index_mapping)
