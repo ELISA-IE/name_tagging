@@ -22,8 +22,9 @@ def load_sentences(path, lower=False, zeros=False):
         line = line.strip()
         if not line:
             if len(sentence) > 0:
-                if 'DOCSTART' not in sentence[0][0]:
-                    sentences.append(sentence)
+                # if 'DOCSTART' not in sentence[0][0]:
+                #     sentences.append(sentence)
+                sentences.append(sentence)
                 sentence = []
         else:
             word = line.split()
@@ -31,8 +32,9 @@ def load_sentences(path, lower=False, zeros=False):
             # assert len(word) >= 2
             sentence.append(word)
     if len(sentence) > 0:
-        if 'DOCSTART' not in sentence[0][0]:
-            sentences.append(sentence)
+        # if 'DOCSTART' not in sentence[0][0]:
+        #     sentences.append(sentence)
+        sentences.append(sentence)
     return sentences
 
 
@@ -84,6 +86,7 @@ def char_mapping(sentences):
     """
     chars = ["".join([w[0] for w in s]) for s in sentences]
     dico = create_dico(chars)
+    dico['<UNK>'] = 10000000
     char_to_id, id_to_char = create_mapping(dico)
     print("Found %i unique characters" % len(dico))
     return dico, char_to_id, id_to_char
@@ -119,6 +122,7 @@ def feats_mapping(sentences, feat_column):
         feats = [[word[i+feat_column] for word in s] for s in sentences]
         dico = create_dico(feats)
         dico['<UNK>'] = 10000000
+        dico['<PADDING>'] = 0
         feat_to_id, id_to_feat = create_mapping(dico)
 
         dico_list.append(dico)
@@ -153,7 +157,7 @@ def prepare_sentence(sentence, feat_column,
     Prepare a sentence for evaluation.
     """
     def f(x): return x.lower() if lower else x
-    max_sent_len = 100
+    max_sent_len = 1000000
     max_word_len = 30
     if is_train:
         sentence = sentence[:max_sent_len]
@@ -162,11 +166,11 @@ def prepare_sentence(sentence, feat_column,
              for w in str_words]
     # set max word len for char embedding layer to prevent memory problem
     if is_train:
-        chars = [[char_to_id[c] if c in char_to_id else 0 for c in w[:max_word_len]]
+        chars = [[char_to_id[c if c in char_to_id else '<UNK>'] for c in w[:max_word_len]]
                  for w in str_words]
     else:
         chars = [
-            [char_to_id[c] if c in char_to_id else 0 for c in w]
+            [char_to_id[c if c in char_to_id else '<UNK>'] for c in w]
             for w in str_words
             ]
     caps = [cap_feature(w) for w in str_words]
@@ -196,7 +200,7 @@ def prepare_sentence(sentence, feat_column,
         'chars': chars,
         'caps': caps,
         'tags': tags,
-        'feats': sent_feats
+        'feats': sent_feats,
     }
 
 

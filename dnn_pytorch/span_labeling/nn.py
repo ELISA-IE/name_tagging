@@ -2,16 +2,19 @@ import torch
 import re
 import torch.nn as nn
 import numpy as np
-from torch.autograd import Variable
 from torch.nn.parameter import Parameter
+import torch.nn.functional as F
+from torch.autograd import Variable
+from dnn_pytorch.seq_labeling.nn import MultiLeNetConv2dLayer
 from dnn_pytorch.seq_labeling.loader import load_embedding
+
 from dnn_pytorch.dnn_utils import init_param, init_variable, log_sum_exp, sequence_mask
 from dnn_pytorch import LongTensor, FloatTensor
 
 
-class SeqLabeling(nn.Module):
+class SpanLabeling(nn.Module):
     def __init__(self, model_param):
-        super(SeqLabeling, self).__init__()
+        super(SpanLabeling, self).__init__()
 
         #
         # model parameters
@@ -25,10 +28,10 @@ class SeqLabeling(nn.Module):
         char_dim = model_param['char_dim']
         char_lstm_dim = model_param['char_lstm_dim']
         feat_dim = model_param['feat_dim']
-        crf = model_param['crf']
         dropout = model_param['dropout']
         char_conv = model_param['char_conv']
         label_size = model_param['label_size']
+        label_weights = model_param['label_weights']
 
         # initialize word lstm input dim to 0
         word_lstm_input_dim = 0
@@ -78,11 +81,9 @@ class SeqLabeling(nn.Module):
         #
         # feat dim
         #
-        if feat_vocab_size:
+        if feat_dim:
             self.feat_emb = [nn.Embedding(v, feat_dim) for v in feat_vocab_size]
             word_lstm_input_dim += len(self.feat_emb) * feat_dim
-        else:
-            self.feat_emb = []
 
         #
         # dropout for word bi-lstm layer
@@ -109,18 +110,20 @@ class SeqLabeling(nn.Module):
                                      word_lstm_dim)
 
         #
+        # attention mechanism to generate span
+        #
+        self.attention = Attention(word_lstm_dim)
+
+        #
         # linear layer before loss
         #
-        self.linear = nn.Linear(word_lstm_dim, label_size)
+        self.linear = nn.Linear(3 * word_lstm_dim, label_size)
 
         #
         # loss
         #
-        if crf:
-            self.criterion = CRFLoss(label_size)
-        else:
-            self.softmax = nn.Softmax()
-            self.criterion = CrossEntropyLoss()
+        self.softmax = nn.Softmax()
+        self.criterion = BalancedCrossEntropyLoss(label_weights)
 
         #
         # initialize weights of each layer
@@ -137,7 +140,7 @@ class SeqLabeling(nn.Module):
             self.char_lstm.flatten_parameters()
         if self.model_param['char_conv']:
             init_param(self.multi_convs)
-        if self.feat_emb:
+        if self.model_param['feat_dim']:
             for f_e in self.feat_emb:
                 init_param(f_e)
 
@@ -145,6 +148,8 @@ class SeqLabeling(nn.Module):
         self.word_lstm.flatten_parameters()
 
         init_param(self.tanh_linear)
+
+        init_param(self.attention)
 
         init_param(self.linear)
 
@@ -273,7 +278,7 @@ class SeqLabeling(nn.Module):
         #
         # feat input
         #
-        if self.feat_emb:
+        if self.model_param['feat_dim']:
             feat_emb = []
             for i, f_e in enumerate(self.feat_emb):
                 feat = inputs['feats'][:, :, i]
@@ -310,263 +315,82 @@ class SeqLabeling(nn.Module):
         tanh_out = nn.Tanh()(self.tanh_linear(word_lstm_out))
 
         #
+        # generate spans using span index
+        #
+        spans = inputs['spans']
+        span_len = inputs['span_len']
+        span_tags = inputs['span_tags']
+        span_pos = inputs['span_pos']
+
+        span_repr = []
+        for i, s in enumerate(spans):
+            s_pos = span_pos[i][0]
+            s_repr = tanh_out[s_pos][s]
+            span_repr.append(s_repr)
+        span_repr = torch.stack(span_repr)
+
+        # compute span representation using attention machanism
+        attentive_span_repr = self.attention(span_repr, span_len)
+
+        # combine attentive span representation with head and tail embeddings.
+        head = span_repr[:, 0]
+        tail = span_repr[torch.from_numpy(np.arange(len(spans))).type(LongTensor),
+                         torch.from_numpy(np.array(span_len) - 1).type(LongTensor)]
+        final_span_repr = torch.cat([head, attentive_span_repr, tail], dim=1)
+
         # fully connected layer
-        #
-        linear_out = self.linear(tanh_out)
+        linear_out = self.linear(final_span_repr)
 
-        #
-        # softmax or crf layer
-        #
-        if type(self.criterion) == CrossEntropyLoss:
-            outputs = torch.stack(
-                [self.softmax(linear_out[i]) for i in range(batch_size)], 0
-            )
-        elif type(self.criterion) == CRFLoss and not self.training:
-            preds = linear_out
-            outputs = self.criterion(
-                preds, None, seq_len, viterbi=True, return_best_sequence=True
-            )
-        else:
-            outputs = None
+        span_outputs = self.softmax(linear_out)
+        # print(span_outputs)
 
-        #
-        # compute batch loss
-        #
+        # cross entropy loss
         loss = 0
         if self.training:
-            if type(self.criterion) == CrossEntropyLoss:
-                preds = outputs
-            elif type(self.criterion) == CRFLoss:
-                preds = linear_out
-            reference = inputs['tags']
+            reference = span_tags
 
-            loss = self.criterion(preds, reference, seq_len)
-            loss /= batch_size
+            loss = self.criterion(span_outputs, reference) / len(spans)
 
-        return outputs, loss
+        return span_outputs, loss
 
 
-class CrossEntropyLoss(nn.Module):
-    def __init__(self):
-        super(CrossEntropyLoss, self).__init__()
+class Attention(nn.Module):
+    def __init__(self, hidden_dim):
+        super(Attention, self).__init__()
 
-    def forward(self, pred, ref, seq_len):
-        batch_size = pred.size(0)
-        max_seq_len = pred.size(1)
+        self.linear = torch.nn.Linear(hidden_dim, hidden_dim)
+        self.tanh = torch.nn.Tanh()
+        self.v = Parameter(
+            torch.from_numpy(init_variable((hidden_dim))).type(FloatTensor)
+        )
+        self.softmax = torch.nn.Softmax()
 
-        mask = sequence_mask(seq_len)
-        mask = Variable(torch.from_numpy(mask).type(FloatTensor))
+    def forward(self, inputs, span_len):
+        e = torch.matmul(self.tanh(self.linear(inputs)), self.v)
 
+        zero_one_mask = Variable(FloatTensor(sequence_mask(span_len)))
+
+        mask = (zero_one_mask - 1) * 1000
+
+        masked_e = e + mask
+
+        alpha = torch.unsqueeze(self.softmax(masked_e) * zero_one_mask, 2)
+
+        x = torch.sum(inputs * alpha, dim=1)
+
+        return x
+
+
+class BalancedCrossEntropyLoss(nn.Module):
+    def __init__(self, label_weights):
+        super(BalancedCrossEntropyLoss, self).__init__()
+
+        self.label_weights = Variable(FloatTensor(label_weights))
+
+    def forward(self, pred, ref):
         # compute cross entropy loss
-        loss = - torch.log(pred)[
-            torch.from_numpy(
-                np.array([np.arange(batch_size)] * max_seq_len).transpose()
-            ).type(LongTensor),
-            torch.from_numpy(
-                np.array([np.arange(max_seq_len)] * batch_size)
-            ).type(LongTensor),
-            ref.data
-        ]
-        loss = torch.sum(loss * mask)
+        loss = - (torch.log(pred)*self.label_weights)[torch.from_numpy(np.arange(pred.size()[0])).type(LongTensor), ref.data]
+        loss = torch.sum(loss)
 
         return loss
-
-
-class CRFLoss(nn.Module):
-    def __init__(self, num_labels):
-        super(CRFLoss, self).__init__()
-
-        self.num_labels = num_labels
-
-        self.transitions = Parameter(
-            torch.from_numpy(init_variable((num_labels+2, num_labels+2))).type(FloatTensor)
-        )
-
-    def forward(self, pred, ref, seq_len,
-                viterbi=False, return_best_sequence=False):
-        # get batch info
-        batch_size = pred.size(0)
-        max_seq_len = pred.size(1)
-        label_size = pred.size(2)
-
-        # add padding to observations.
-        small = -1000
-        b_s_array = np.array(
-            [[[small] * self.num_labels + [0, small]]] * batch_size
-        ).astype(np.float32)
-        b_s = Variable(torch.from_numpy(b_s_array).type(FloatTensor))
-        right_padding_array = np.array(
-            [[[0] * self.num_labels + [small, small]]] * batch_size
-        ).astype(np.float32)
-        right_padding = Variable(
-            torch.from_numpy(right_padding_array).type(FloatTensor)
-        )
-        observations = torch.cat(
-            [pred,
-             Variable(
-                 small * torch.ones((batch_size, max_seq_len, 2)).type(FloatTensor)
-             )],
-            dim=2
-        )
-        observations = torch.cat(
-            [b_s, observations, right_padding],
-            dim=1
-        )
-
-        # because of various length in batch, add e_s to the real end of each
-        # sequence
-        e_s = np.array([small] * self.num_labels + [0, 1000]).astype(np.float32)
-        e_s_mask = np.zeros(observations.size())
-        for i in range(batch_size):
-            e_s_mask[i][seq_len[i]+1] = e_s
-        observations += Variable(torch.from_numpy(e_s_mask).type(FloatTensor))
-
-        # compute all path scores
-        paths_scores = Variable(
-            FloatTensor(max_seq_len+1, batch_size, label_size+2)
-        )
-        paths_indices = Variable(
-            LongTensor(max_seq_len+1, batch_size, label_size+2)
-        )
-        previous = observations[:, 0]
-        for i in range(1, observations.size(1)):
-            obs = observations[:, i]
-            _previous = torch.unsqueeze(previous, 2)
-            _obs = torch.unsqueeze(obs, 1)
-            if viterbi:
-                scores = _previous + _obs + self.transitions
-                out, out_indices = scores.max(dim=1)
-                if return_best_sequence:
-                    paths_indices[i-1] = out_indices
-                paths_scores[i-1] = out
-                previous = out
-            else:
-                previous = log_sum_exp(_previous + _obs + self.transitions,
-                                       dim=1)
-                paths_scores[i-1] = previous
-
-        paths_scores = paths_scores.permute(1, 0, 2)
-        paths_indices = paths_indices.permute(1, 0, 2)
-
-        all_paths_scores = log_sum_exp(
-            paths_scores[
-                torch.from_numpy(np.arange(batch_size)).type(LongTensor),
-                torch.from_numpy(seq_len).type(LongTensor)
-            ],
-            dim=1
-        ).sum()
-
-        # return indices of best paths.
-        if return_best_sequence:
-            sequence = []
-            for i in range(len(paths_indices)):
-                p_indices = paths_indices[i][:seq_len[i]+1]
-                p_score = paths_scores[i][:seq_len[i]+1]
-                _, previous = p_score[-1].max(dim=0)
-                seq = []
-                for j in reversed(range(len(p_score))):
-                    s = p_indices[j]
-                    previous = s[previous]
-                    seq.append(previous)
-
-                seq = torch.cat(seq[::-1]+[p_score[-1].max(dim=0)[1]])
-
-                sequence.append(seq[1:-1])
-
-            return sequence
-
-        # compute real path score if reference is provided
-        if ref is not None:
-            # Score from tags
-            real_path_mask = Variable(
-                torch.from_numpy(sequence_mask(seq_len))
-            ).type(FloatTensor)
-            real_path_score = pred[
-                torch.from_numpy(
-                    np.array([np.arange(batch_size)]*max_seq_len).transpose()
-                ).type(LongTensor),
-                torch.from_numpy(
-                    np.array([np.arange(max_seq_len)]*batch_size)
-                ).type(LongTensor),
-                ref.data
-            ]
-            real_path_score = torch.sum(real_path_score * real_path_mask)
-
-            # Score from transitions
-            b_id = Variable(
-                torch.from_numpy(
-                    np.array([[self.num_labels]] * batch_size)
-                ).type(LongTensor)
-            )
-            right_padding = Variable(torch.zeros(b_id.size())).type(LongTensor)
-
-            padded_tags_ids = torch.cat([b_id, ref, right_padding], dim=1)
-
-            # because of various length in batch, add e_id to the real end of
-            # each sequence
-            e_id = np.array([self.num_labels+1])
-            e_id_mask = np.zeros(padded_tags_ids.size())
-            for i in range(batch_size):
-                e_id_mask[i][seq_len[i] + 1] = e_id
-
-            padded_tags_ids += Variable(
-                torch.from_numpy(e_id_mask)
-            ).type(LongTensor)
-
-            # mask out padding in batch
-            transition_score_mask = Variable(
-                torch.from_numpy(sequence_mask(seq_len+1))
-            ).type(FloatTensor)
-            real_transition_score = self.transitions[
-                padded_tags_ids[
-                :, torch.from_numpy(np.arange(max_seq_len + 1)).type(LongTensor)
-                ].data,
-                padded_tags_ids[
-                :, torch.from_numpy(np.arange(max_seq_len + 1) + 1).type(LongTensor)
-                ].data
-            ]
-            real_path_score += torch.sum(
-                real_transition_score * transition_score_mask
-            )
-
-            # compute loss
-            loss = all_paths_scores - real_path_score
-
-            return loss
-
-
-class MultiLeNetConv2dLayer(nn.Module):
-    def __init__(self, kernel_shape, pool_sizes):
-        super(MultiLeNetConv2dLayer, self).__init__()
-
-        num_conv = len(kernel_shape)
-        in_channels = [item[0] for item in kernel_shape]
-        out_channels = [item[1] for item in kernel_shape]
-        kernel_size = [item[2] for item in kernel_shape]
-
-        self.conv_nets = []
-        self.max_pool2d = []
-        for i in range(num_conv):
-            conv = nn.Conv2d(in_channels[i], int(out_channels[i]), kernel_size[i])
-            self.conv_nets.append(conv)
-
-            max_pool2d = nn.MaxPool2d(pool_sizes[i])
-            self.max_pool2d.append(max_pool2d)
-        self.conv_nets = nn.ModuleList(self.conv_nets)
-        self.max_pool2d = nn.ModuleList(self.max_pool2d)
-
-    def forward(self, input):
-        conv_out = []
-        input = torch.unsqueeze(input, 1)
-        for conv in self.conv_nets:
-            conv_out.append(conv(input))
-
-        pooling_out = []
-        for i, pool in enumerate(self.max_pool2d):
-            pooling_out.append(pool(conv_out[i]).squeeze())
-
-        return pooling_out
-
-
-
 

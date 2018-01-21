@@ -174,7 +174,11 @@ def create_input(data, parameters, add_label=True):
     the training or the evaluation function.
     """
     # sort data by sequence length
-    seq_index_mapping, data = zip(*[item for item in sorted(enumerate(data), key=lambda x: len(x[1]['words']), reverse=True)])
+    seq_index_mapping, data = zip(
+        *[item for item in sorted(
+            enumerate(data), key=lambda x: len(x[1]['words']), reverse=True
+        )]
+    )
     seq_index_mapping = {v: i for i, v in enumerate(seq_index_mapping)}
 
     inputs = collections.defaultdict(list)
@@ -208,14 +212,19 @@ def create_input(data, parameters, add_label=True):
         if k == 'chars':
             padded_chars, char_index_mapping, char_len = pad_chars(v)
             inputs[k] = padded_chars
-        else:
+        elif k in ['words', 'caps', 'feats', 'tags']:
             inputs[k] = pad_word(v, seq_len)
 
     # convert inputs and labels to Variable
     for k, v in inputs.items():
         inputs[k] = Variable(LongTensor(v))
 
-    return inputs, seq_index_mapping, char_index_mapping, seq_len, char_len
+    inputs['seq_index_mapping'] = seq_index_mapping
+    inputs['char_index_mapping'] = char_index_mapping
+    inputs['seq_len'] = seq_len
+    inputs['char_len'] = char_len
+
+    return inputs
 
 
 def evaluate(preds, dataset, id_to_tag, eval_out_dir=None):
@@ -246,7 +255,7 @@ def evaluate(preds, dataset, id_to_tag, eval_out_dir=None):
     with codecs.open(output_path, 'w', 'utf8') as f:
         f.write("\n".join(predictions))
     os.system("%s < %s > %s" % (eval_script, output_path, scores_path))
-
+    print(output_path)
     # CoNLL evaluation results
     eval_lines = [l.rstrip() for l in codecs.open(scores_path, 'r', 'utf8')]
     for line in eval_lines:

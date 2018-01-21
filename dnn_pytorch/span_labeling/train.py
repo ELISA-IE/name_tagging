@@ -7,14 +7,17 @@ import torch
 import itertools
 import numpy as np
 import torch.optim as optim
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 
-from dnn_pytorch.seq_labeling.nn import SeqLabeling
-from dnn_pytorch.seq_labeling.utils import create_input, Tee
+from dnn_pytorch.seq_labeling.utils import Tee
 from dnn_pytorch.seq_labeling.utils import evaluate, eval_script
-from dnn_pytorch.seq_labeling.loader import word_mapping, char_mapping, tag_mapping, feats_mapping
-from dnn_pytorch.seq_labeling.loader import update_tag_scheme, prepare_dataset, load_sentences
+from dnn_pytorch.seq_labeling.loader import word_mapping, char_mapping, feats_mapping, tag_mapping
+from dnn_pytorch.seq_labeling.loader import update_tag_scheme, load_sentences
 from dnn_pytorch.seq_labeling.loader import augment_with_pretrained
+
+from dnn_pytorch.span_labeling.nn import SpanLabeling
+from dnn_pytorch.span_labeling.loader import prepare_dataset, span_tag_mapping, kbid_mapping
+from dnn_pytorch.span_labeling.utils import create_input
 from dnn_pytorch.dnn_utils import exp_lr_scheduler
 
 
@@ -90,10 +93,10 @@ parser.add_argument(
     help='the number of the column where features start. default is 1, '
          'the 2nd column.'
 )
-parser.add_argument(
-    "--crf", default="1",
-    type=int, help="Use CRF (0 to disable)"
-)
+# parser.add_argument(
+#     "--crf", default="1",
+#     type=int, help="Use CRF (0 to disable)"
+# )
 parser.add_argument(
     "--dropout", default="0.5",
     type=float, help="Droupout on the input (0 = no dropout)"
@@ -140,7 +143,6 @@ parameters['all_emb'] = args.all_emb == 1
 parameters['cap_dim'] = args.cap_dim
 parameters['feat_dim'] = args.feat_dim
 parameters['feat_column'] = args.feat_column
-parameters['crf'] = args.crf == 1
 parameters['dropout'] = args.dropout
 parameters['lr_method'] = args.lr_method
 parameters['num_epochs'] = args.num_epochs
@@ -154,7 +156,7 @@ for k, v in parameters.items():
     if k == 'pre_emb':
         v = os.path.basename(v)
     model_name.append('='.join((k, str(v))))
-model_dir = os.path.join(model_dir, ','.join(model_name[:-1]))
+model_dir = os.path.join(model_dir, ','.join(model_name[:]))
 
 # Check parameters validity
 assert os.path.isfile(args.train)
@@ -197,9 +199,9 @@ train_sentences = load_sentences(args.train, lower, zeros)
 dev_sentences = load_sentences(args.dev, lower, zeros)
 test_sentences = load_sentences(args.test, lower, zeros)
 
-# train_sentences = train_sentences[:50]
-# dev_sentences = dev_sentences[:50]
-# test_sentences = test_sentences[:50]
+train_sentences = train_sentences[:200]
+dev_sentences = dev_sentences[:200]
+test_sentences = test_sentences[:200]
 
 # Use selected tagging scheme (IOB / IOBES), also check tagging scheme
 update_tag_scheme(train_sentences, tag_scheme)
@@ -221,15 +223,21 @@ else:
     dico_words, word_to_id, id_to_word = word_mapping(train_sentences, lower)
     dico_words_train = dico_words
 
-# Create a dictionary and a mapping for words / POS tags / tags
+# Create a dictionary and a mapping for chars / tags / span tags / features / kbid
 dico_chars, char_to_id, id_to_char = char_mapping(train_sentences)
 dico_tags, tag_to_id, id_to_tag = tag_mapping(train_sentences)
+dico_span_tags, span_tag_to_id, id_to_span_tag = span_tag_mapping(train_sentences)
 # create a dictionary and a mapping for each feature
 dico_feats_list, feat_to_id_list, id_to_feat_list = feats_mapping(
     train_sentences, parameters['feat_column']
 )
+dico_kbid, kbid_to_id, id_to_kbid = kbid_mapping(train_sentences+dev_sentences+test_sentences)
 
-parameters['label_size'] = len(id_to_tag)
+parameters['label_size'] = len(id_to_span_tag)
+parameters['label_weights'] = [
+    sum(dico_span_tags.values()) / dico_span_tags[id_to_span_tag[i]]
+    for i in range(len(id_to_span_tag))
+    ]
 parameters['word_vocab_size'] = len(id_to_word)
 parameters['char_vocab_size'] = len(id_to_char)
 parameters['feat_vocab_size'] = [len(item) for item in id_to_feat_list]
@@ -238,15 +246,21 @@ parameters['feat_vocab_size'] = [len(item) for item in id_to_feat_list]
 dataset = dict()
 dataset['train'] = prepare_dataset(
     train_sentences, parameters['feat_column'],
-    word_to_id, char_to_id, tag_to_id, feat_to_id_list, lower
+    word_to_id, char_to_id, tag_to_id, span_tag_to_id, feat_to_id_list,
+    kbid_to_id, lower,
+    tag_scheme=tag_scheme
 )
 dataset['dev'] = prepare_dataset(
     dev_sentences, parameters['feat_column'],
-    word_to_id, char_to_id, tag_to_id, feat_to_id_list, lower
+    word_to_id, char_to_id, tag_to_id, span_tag_to_id, feat_to_id_list,
+    kbid_to_id, lower,
+    tag_scheme=tag_scheme
 )
 dataset['test'] = prepare_dataset(
     test_sentences, parameters['feat_column'],
-    word_to_id, char_to_id, tag_to_id, feat_to_id_list, lower
+    word_to_id, char_to_id, tag_to_id, span_tag_to_id, feat_to_id_list,
+    kbid_to_id, lower,
+    tag_scheme=tag_scheme
 )
 
 print("%i / %i / %i sentences in train / dev / test." % (
@@ -254,7 +268,7 @@ print("%i / %i / %i sentences in train / dev / test." % (
 
 # initialize model
 print('model initializing...')
-model = SeqLabeling(parameters)
+model = SpanLabeling(parameters)
 model.load_pretrained(id_to_word, **parameters)
 
 # Parse optimization method parameters
@@ -271,7 +285,9 @@ else:
     lr_method_parameters = {}
 # initialize optimizer function
 if lr_method_name == 'sgd':
-    optimizer_ft = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+    optimizer_ft = optim.SGD(
+        model.parameters(), lr=0.01, momentum=0.9, weight_decay=0.0001
+    )
 else:
     print('unknown optimization method.')
 
@@ -331,18 +347,66 @@ for epoch in range(num_epochs):
                 )
                 sys.stdout.flush()
             else:
-                seq_index_mapping = inputs['seq_index_mapping']
-                seq_len = inputs['seq_len']
-                if parameters['crf']:
-                    preds += [outputs[seq_index_mapping[j]].data
-                              for j in range(len(outputs))]
-                else:
-                    _, _preds = torch.max(outputs.data, 2)
+                span_preds = defaultdict(list)
+                spans = inputs['spans']
+                span_pos = inputs['span_pos']
+                span_len = inputs['span_len']
+                for j, s_pred in enumerate(outputs):
+                    _, pred = torch.max(s_pred, dim=0)
+                    pred_label = id_to_span_tag[pred.data[0]]
+                    confidence = s_pred[pred]
+                    s_pos = span_pos[j]
+                    if pred_label is not 'O':
+                        span_preds[s_pos[0]].append(
+                            (set(spans[j][:span_len[j]].data), pred.data[0], confidence.data[0]))
 
-                    preds += [
-                        _preds[seq_index_mapping[j]][:seq_len[seq_index_mapping[j]]]
-                        for j in range(len(seq_index_mapping))
-                        ]
+                # clean overlapped mentions, choose mentions with highest conf
+                # score
+                _preds = []
+                seq_len = inputs['seq_len']
+                for j in range(len(seq_len)):
+                    span_pred = span_preds[j]
+
+                    # remove spans that exceed sequence length before padding
+                    span_pred = [s for s in span_pred if max(s[0]) < seq_len[j]]
+
+                    # sort span prediction by confidence
+                    sorted_span_pred = sorted(span_pred, key=lambda x: x[2], reverse=True)
+
+                    # choose span with top confidence and remove conflicted span
+                    conflict_table = defaultdict(set)
+                    for k, s in enumerate(sorted_span_pred):
+                        index, _, _ = s
+                        for l in index:
+                            conflict_table[l].add(k)
+                    unique_span_pred = []
+                    span_to_ignore = set()
+                    for k, s in enumerate(sorted_span_pred):
+                        index, _, _ = s
+                        if k not in span_to_ignore:
+                            unique_span_pred.append(s)
+                            for l in index:
+                                span_to_ignore |= conflict_table[l]
+
+                    # convert span labels to bio labels
+                    p = dict()
+                    for s in unique_span_pred:
+                        index, pred, _ = s
+                        for k, l in enumerate(sorted(index)):
+                            if len(index) == 1:
+                                p[l] = tag_to_id['S-' + id_to_span_tag[pred]]
+                            elif k == 0:
+                                p[l] = tag_to_id['B-' + id_to_span_tag[pred]]
+                            elif k == len(index) - 1:
+                                p[l] = tag_to_id['E-' + id_to_span_tag[pred]]
+                            else:
+                                p[l] = tag_to_id['I-' + id_to_span_tag[pred]]
+
+                    _preds.append([p[k] if k in p else tag_to_id['O'] for k in range(seq_len[j])])
+
+                seq_index_mapping = inputs['seq_index_mapping']
+                preds += [_preds[seq_index_mapping[j]]
+                          for j in range(len(seq_index_mapping))]
 
         if phase == 'train':
             epoch_loss = sum(epoch_loss) / len(epoch_loss)
@@ -370,7 +434,8 @@ for epoch in range(num_epochs):
                     'id_to_word': id_to_word,
                     'id_to_char': id_to_char,
                     'id_to_tag': id_to_tag,
-                    'id_to_feat_list': id_to_feat_list  # boliang
+                    'id_to_span_tag': id_to_span_tag,
+                    'id_to_feat_list': id_to_feat_list
                 },
                 'state_dict': model.state_dict(),
                 'best_prec1': best_dev,

@@ -16,8 +16,8 @@ def exp_lr_scheduler(optimizer, epoch, init_lr=0.01, lr_decay_epoch=7):
     return optimizer
 
 
-def init_variable(shape):
-    if len(shape) == 1:
+def init_variable(shape, zero=False):
+    if zero:
         value = np.zeros(shape)  # bias are initialized with zeros
     else:
         drange = np.sqrt(6. / (np.sum(shape)))
