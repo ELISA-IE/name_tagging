@@ -563,7 +563,10 @@ class MultiLeNetConv2dLayer(nn.Module):
 
         pooling_out = []
         for i, pool in enumerate(self.max_pool2d):
-            pooling_out.append(pool(conv_out[i]).squeeze())
+            # squeeze the last two dimensions
+            after_pool = pool(conv_out[i]).squeeze(2).squeeze(2)
+
+            pooling_out.append(after_pool)
 
         return pooling_out
 

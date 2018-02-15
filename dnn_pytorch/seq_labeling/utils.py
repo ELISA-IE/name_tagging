@@ -3,6 +3,7 @@ import re
 import io
 import itertools
 import codecs
+import tempfile
 import numpy as np
 import collections
 from torch.autograd import Variable
@@ -249,7 +250,7 @@ def evaluate(preds, dataset, id_to_tag, eval_out_dir=None):
     eval_id = np.random.randint(1000000, 2000000)
     if eval_out_dir:
         eval_temp = eval_out_dir
-    eval_temp = os.path.join(eval_path, 'tmp')
+    eval_temp = tempfile.mkdtemp()
     output_path = os.path.join(eval_temp, "eval.%i.output" % eval_id)
     scores_path = os.path.join(eval_temp, "eval.%i.scores" % eval_id)
     with codecs.open(output_path, 'w', 'utf8') as f:

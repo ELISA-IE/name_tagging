@@ -197,9 +197,9 @@ train_sentences = load_sentences(args.train, lower, zeros)
 dev_sentences = load_sentences(args.dev, lower, zeros)
 test_sentences = load_sentences(args.test, lower, zeros)
 
-# train_sentences = train_sentences[:50]
-# dev_sentences = dev_sentences[:50]
-# test_sentences = test_sentences[:50]
+# train_sentences = train_sentences[:200]
+# dev_sentences = dev_sentences[:200]
+# test_sentences = test_sentences[:200]
 
 # Use selected tagging scheme (IOB / IOBES), also check tagging scheme
 update_tag_scheme(train_sentences, tag_scheme)
@@ -289,7 +289,7 @@ for epoch in range(num_epochs):
     time_epoch_start = time.time()  # epoch start time
 
     # Each epoch has a training and validation phase
-    for phase in ['train', 'dev', 'test'][:]:
+    for phase in ['train', 'dev', 'test']:
         if phase == 'train':
             optimizer = exp_lr_scheduler(optimizer_ft, epoch,
                                          **lr_method_parameters)
@@ -307,6 +307,7 @@ for epoch in range(num_epochs):
 
             # forward
             outputs, loss = model.forward(inputs)
+
             try:
                 epoch_loss.append(loss.data[0])
             except AttributeError:

@@ -21,6 +21,7 @@ class SpanLabeling(nn.Module):
         #
         self.model_param = model_param
         word_vocab_size = model_param['word_vocab_size']
+        entity_vocab_size = model_param['entity_vocab_size']
         char_vocab_size = model_param['char_vocab_size']
         feat_vocab_size = model_param['feat_vocab_size']
         word_dim = model_param['word_dim']
@@ -32,6 +33,7 @@ class SpanLabeling(nn.Module):
         char_conv = model_param['char_conv']
         label_size = model_param['label_size']
         label_weights = model_param['label_weights']
+        entity_dim = model_param['entity_dim']
 
         # initialize word lstm input dim to 0
         word_lstm_input_dim = 0
@@ -117,13 +119,26 @@ class SpanLabeling(nn.Module):
         #
         # linear layer before loss
         #
-        self.linear = nn.Linear(3 * word_lstm_dim, label_size)
+        # the added 1 dimension is linking entity probability feature
+        self.linear = nn.Linear(3 * word_lstm_dim + entity_dim + 1, label_size)
 
         #
         # loss
         #
         self.softmax = nn.Softmax()
-        self.criterion = BalancedCrossEntropyLoss(label_weights)
+        self.tagging_loss = BalancedCrossEntropyLoss(label_weights)
+
+        #
+        # entity embeddings
+        #
+        self.entity_emb = nn.Embedding(entity_vocab_size, entity_dim)
+
+        #
+        # linking parameters
+        #
+        self.span_projection = nn.Linear(3 * word_lstm_dim, entity_dim)
+        self.similarity_layer = nn.Linear((2 * entity_dim) + 1, 1)
+        self.linking_loss = CrossEntropyLoss()
 
         #
         # initialize weights of each layer
@@ -152,6 +167,13 @@ class SpanLabeling(nn.Module):
         init_param(self.attention)
 
         init_param(self.linear)
+
+        # linking
+        init_param(self.entity_emb)
+
+        init_param(self.span_projection)
+
+        init_param(self.similarity_layer)
 
     def load_pretrained(self, id_to_word, pre_emb, word_dim, **kwargs):
         if not pre_emb:
@@ -201,6 +223,62 @@ class SpanLabeling(nn.Module):
               'pretrained embeddings.' % (
                   c_found + c_lower + c_zeros, len(id_to_word),
                   100. * (c_found + c_lower + c_zeros) / len(id_to_word)
+              ))
+        print('%i found directly, %i after lowercasing, '
+              '%i after lowercasing + zero.' % (
+                  c_found, c_lower, c_zeros
+              ))
+
+    def load_pretrained_entity(self, id_to_entity, entity_emb, entity_dim, **kwargs):
+        if not entity_emb:
+            return
+
+        # Initialize with pretrained entity embeddings
+        new_weights = self.entity_emb.weight.data
+        print('Loading pretrained entity embeddings from %s...' % entity_emb)
+        pretrained = {}
+        emb_invalid = 0
+        for i, line in enumerate(load_embedding(entity_emb)):
+            if type(line) == bytes:
+                try:
+                    line = str(line, 'utf-8')
+                except UnicodeDecodeError:
+                    continue
+            line = line.rstrip().split()
+            if len(line) == entity_dim + 1:
+                pretrained[line[0]] = np.array(
+                    [float(x) for x in line[1:]]
+                ).astype(np.float32)
+            else:
+                emb_invalid += 1
+        if emb_invalid > 0:
+            print('WARNING: %i invalid lines' % emb_invalid)
+        c_found = 0
+        c_lower = 0
+        c_zeros = 0
+        # Lookup table initialization
+        for i in range(len(id_to_entity)):
+            word = id_to_entity[i]
+            if word in pretrained:
+                new_weights[i] = torch.from_numpy(pretrained[word])
+                c_found += 1
+            elif word.lower() in pretrained:
+                new_weights[i] = torch.from_numpy(pretrained[word.lower()])
+                c_lower += 1
+            elif re.sub('\d', '0', word.lower()) in pretrained:
+                new_weights[i] = torch.from_numpy(
+                    pretrained[re.sub('\d', '0', word.lower())]
+                )
+                c_zeros += 1
+            # else:
+            #     print(word)
+        self.entity_emb.weight = nn.Parameter(new_weights)
+
+        print('Loaded %i pretrained entity embeddings.' % len(pretrained))
+        print('%i / %i (%.4f%%) entities have been initialized with '
+              'pretrained embeddings.' % (
+                  c_found + c_lower + c_zeros, len(id_to_entity),
+                  100. * (c_found + c_lower + c_zeros) / len(id_to_entity)
               ))
         print('%i found directly, %i after lowercasing, '
               '%i after lowercasing + zero.' % (
@@ -317,7 +395,7 @@ class SpanLabeling(nn.Module):
         #
         # generate spans using span index
         #
-        spans = inputs['spans']
+        spans = Variable(torch.from_numpy(inputs['spans'])).type(LongTensor)
         span_len = inputs['span_len']
         span_tags = inputs['span_tags']
         span_pos = inputs['span_pos']
@@ -336,22 +414,105 @@ class SpanLabeling(nn.Module):
         head = span_repr[:, 0]
         tail = span_repr[torch.from_numpy(np.arange(len(spans))).type(LongTensor),
                          torch.from_numpy(np.array(span_len) - 1).type(LongTensor)]
-        final_span_repr = torch.cat([head, attentive_span_repr, tail], dim=1)
+        attentive_span_repr = torch.cat([head, attentive_span_repr, tail], dim=1)
+
+        #
+        # linking model
+        #
+        linking_loss = 0
+        linking_prob = None
+        if self.model_param['entity_dim']:
+            span_entity_tags = Variable(
+                torch.from_numpy(inputs['span_entity_tags'])).type(LongTensor)
+            span_candidates = Variable(
+                torch.from_numpy(inputs['span_candidates'])).type(LongTensor)
+            span_candidate_len = inputs['span_candidate_len']
+
+            # only process spans that have entity candidates
+            span_index_to_process = Variable(
+                torch.from_numpy(
+                    np.array(
+                        [i for i, l in enumerate(span_candidate_len) if l != 0])
+                )
+            ).type(LongTensor)
+            spans_to_process = attentive_span_repr[span_index_to_process]
+            candidates_to_process = span_candidates[span_index_to_process]
+            candidate_len_to_process = span_candidate_len[
+                span_index_to_process.data.cpu().numpy()]
+            entity_tags_to_process = span_entity_tags[span_index_to_process]
+
+            projectes_spans = nn.Tanh()(self.span_projection(spans_to_process))
+
+            num_candidates = span_candidates.size()[1]
+            expanded_projectes_spans = torch.unsqueeze(projectes_spans,
+                                                       1).expand(
+                projectes_spans.size()[0], num_candidates,
+                projectes_spans.size()[1])
+
+            candidates_repr = self.entity_emb(candidates_to_process)
+            dot_product = torch.sum(expanded_projectes_spans * candidates_repr,
+                                    dim=2)
+            v = torch.cat([expanded_projectes_spans, candidates_repr,
+                           dot_product.unsqueeze(2)], dim=2)
+
+            sim_value = torch.squeeze(self.similarity_layer(v))
+
+            # spans have various number of candidates. mask is used to compute loss
+            # correctly
+            zero_one_mask = Variable(
+                FloatTensor(sequence_mask(candidate_len_to_process.data)))
+            mask = (zero_one_mask - 1) * 1000
+            masked_sim_value = sim_value + mask
+
+            linking_prob = self.softmax(masked_sim_value)
+
+            if self.training:
+                linking_loss = self.linking_loss(linking_prob, entity_tags_to_process) / spans_to_process.size(0)
+
+            all_span_linking_prob = torch.zeros(spans.size()[0], linking_prob.size()[1])
+            all_span_linking_prob[:, 0] = 1
+
+            for i in range(span_index_to_process.size()[0]):
+                all_span_linking_prob[span_index_to_process[i].data.cpu().numpy()[0]] = linking_prob[i].data
+
+        #
+        # tagging model
+        #
+        # add top 1 linking result to span representations
+        _, linking_pred = torch.max(linking_prob, dim=1)
+        linked_entity_repr = candidates_repr[torch.from_numpy(np.arange(candidates_repr.size()[0])).type(LongTensor), linking_pred.data]
+
+        all_span_linking_repr = [self.entity_emb(Variable(LongTensor([0]))).squeeze(0)] * attentive_span_repr.size()[0]
+        for i in range(span_index_to_process.size()[0]):
+            all_span_linking_repr[span_index_to_process[i].data.cpu().numpy()[0]] = linked_entity_repr[i]
+        all_span_linking_repr = torch.stack(all_span_linking_repr)
+
+        final_span_repr = torch.cat([attentive_span_repr, all_span_linking_repr], dim=1)
+
+        # add top 1 linking result probability as feature
+        span_linking_prob = Variable(torch.zeros(final_span_repr.size()[0], 1)).type(FloatTensor)
+        for i in range(span_index_to_process.size()[0]):
+            span_linking_prob[span_index_to_process[i].data.cpu().numpy()[0]] = linking_prob[i][linking_pred[i]]
+        final_span_repr = torch.cat([final_span_repr, span_linking_prob], dim=1)
 
         # fully connected layer
         linear_out = self.linear(final_span_repr)
 
-        span_outputs = self.softmax(linear_out)
-        # print(span_outputs)
+        ner_prob = self.softmax(linear_out)
 
         # cross entropy loss
-        loss = 0
+        tagging_loss = 0
         if self.training:
             reference = span_tags
 
-            loss = self.criterion(span_outputs, reference) / len(spans)
+            tagging_loss = self.tagging_loss(ner_prob, reference) / len(spans)
 
-        return span_outputs, loss
+        ner_prob = ner_prob.data  # Variable object to Tensor object
+
+        # combine two loss
+        loss = tagging_loss + linking_loss
+
+        return ner_prob, all_span_linking_prob, loss, tagging_loss, linking_loss
 
 
 class Attention(nn.Module):
@@ -359,14 +520,13 @@ class Attention(nn.Module):
         super(Attention, self).__init__()
 
         self.linear = torch.nn.Linear(hidden_dim, hidden_dim)
-        self.tanh = torch.nn.Tanh()
         self.v = Parameter(
             torch.from_numpy(init_variable((hidden_dim))).type(FloatTensor)
         )
         self.softmax = torch.nn.Softmax()
 
     def forward(self, inputs, span_len):
-        e = torch.matmul(self.tanh(self.linear(inputs)), self.v)
+        e = torch.matmul(nn.Tanh()(self.linear(inputs)), self.v)
 
         zero_one_mask = Variable(FloatTensor(sequence_mask(span_len)))
 
@@ -390,6 +550,18 @@ class BalancedCrossEntropyLoss(nn.Module):
     def forward(self, pred, ref):
         # compute cross entropy loss
         loss = - (torch.log(pred)*self.label_weights)[torch.from_numpy(np.arange(pred.size()[0])).type(LongTensor), ref.data]
+        loss = torch.sum(loss)
+
+        return loss
+
+
+class CrossEntropyLoss(nn.Module):
+    def __init__(self):
+        super(CrossEntropyLoss, self).__init__()
+
+    def forward(self, pred, ref):
+        # compute cross entropy loss
+        loss = - torch.log(pred[torch.from_numpy(np.arange(pred.size()[0])).type(LongTensor), ref.data])
         loss = torch.sum(loss)
 
         return loss

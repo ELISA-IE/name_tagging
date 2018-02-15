@@ -157,7 +157,7 @@ def prepare_sentence(sentence, feat_column,
     Prepare a sentence for evaluation.
     """
     def f(x): return x.lower() if lower else x
-    max_sent_len = 1000000
+    max_sent_len = 200
     max_word_len = 30
     if is_train:
         sentence = sentence[:max_sent_len]
