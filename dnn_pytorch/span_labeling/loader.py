@@ -59,7 +59,7 @@ def prepare_sentence(sentence, feat_column,
                 assert all([span_entity[i][j] == span_entity[i][0] for j in range(len(span_entity[i]))])
                 entity = span_entity[i][0]
             else:
-                entity = '<NIL>'
+                entity = '<O>'
 
             # only keep perfect mention spans when evaluating linking
             # if label == 'O':
@@ -78,7 +78,7 @@ def prepare_sentence(sentence, feat_column,
     # generate span entity candidates using elisa api
     span_candidates = []
     span_candidate_conf = []
-    span_entity_tag = []
+    span_gold_candidate = []
     for i, s in enumerate(span_index):
         span_text = ' '.join([sentence[index][0] for index in s])
 
@@ -88,24 +88,47 @@ def prepare_sentence(sentence, feat_column,
         # candidates = ['<NIL>'] * 10
         # candidate_conf = [0] * 10
 
-        candidates_id = [entity_to_id[item] if item in entity_to_id else 0 for
-                         item in candidates]
+        # '<O>' means the span is not a mention, '<NIL>' means the span is a
+        # mention but it does not have a kb id. ignore the entity candidate if
+        # it's not in entity_to_id. 'o_conf' and 'nil_conf' will be learned
+        # from training data
+        padded_candidates = []
+        for j, item in enumerate(candidates):
+            if item in entity_to_id:
+                padded_candidates.append(
+                    (entity_to_id[item], candidate_conf[j])
+                )
+        padded_candidates += [
+            (entity_to_id['<O>'], 'o_conf'), (entity_to_id['<NIL>'], 'nil_conf')
+        ]
+
+        candidates_id, candidate_conf = zip(*padded_candidates)
+        candidates_id = list(candidates_id)
+        candidate_conf = list(candidate_conf)
 
         if is_train:
             if span_entity[i] in candidates_id:
-                entity_tag = candidates_id.index(span_entity[i])
-                span_entity_tag.append(entity_tag)
+                candidate_index = candidates_id.index(span_entity[i])
+                span_gold_candidate.append(candidate_index)
+            # add gold to candidate if it's not in the retrieved candidates
+            # else:
+            #     candidates_id = [span_entity[i]] + candidates_id
+            #     candidate_conf = [1] + candidate_conf
+            #     span_gold_candidate.append(0)
+            # set gold candidate to <NIL> if the gold candidate is not in the
+            # retrieved candidates
             else:
-                candidates_id = [span_entity[i]] + candidates_id
-                candidate_conf = [1] + candidate_conf
-                span_entity_tag.append(0)
+                candidate_index = candidates_id.index(entity_to_id['<NIL>'])
+                span_gold_candidate.append(candidate_index)
+
+        assert span_gold_candidate[i] < len(candidates_id)
 
         span_candidates.append(candidates_id)
         span_candidate_conf.append(candidate_conf)
 
     rtn['span_index'] = span_index
     rtn['span_tag'] = span_tag
-    rtn['span_entity_tag'] = span_entity_tag
+    rtn['span_gold_candidate'] = span_gold_candidate
     rtn['span_candidates'] = span_candidates
     rtn['span_candidate_conf'] = span_candidate_conf
 
@@ -130,8 +153,7 @@ def prepare_dataset(sentences, feat_column,
                              feat_to_id_list, entity_to_id,
                              lower, is_train=is_train, tag_scheme=tag_scheme)
         )
-        # requests = sum([len(item['span_index']) for item in data])
-        # print(requests)
+
     return data
 
 
@@ -154,7 +176,6 @@ def entity_mapping(sentences):
     """
     entities = [[word[-2] for word in s] for s in sentences]
     dico = loader.create_dico(entities)
-    dico['<NIL>'] = 1000000000
     entity_to_id, id_to_entity = loader.create_mapping(dico)
     print("Found %i unique entities" % len(dico))
     return dico, entity_to_id, id_to_entity
@@ -227,6 +248,6 @@ def augment_with_entity_pretrained(dico_entity, entity_emb):
             dico_entity[e] = 0
 
     entity_to_id, id_to_entity = loader.create_mapping(dico_entity)
-    print(len(entity_to_id))
+
     return dico_entity, entity_to_id, id_to_entity
 

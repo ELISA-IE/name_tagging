@@ -234,12 +234,6 @@ def augment_with_pretrained(dictionary, ext_emb_path, words):
     print('Loading pretrained embeddings from %s...' % ext_emb_path)
     assert os.path.isfile(ext_emb_path)
 
-    # debug embeddings
-    # index = 0
-    # for line in codecs.open(ext_emb_path, 'r', 'utf-8'):
-    #     index += 1
-    #     print(index)
-
     # Load pretrained embeddings from file
     pretrained = []
     if len(ext_emb_path) > 0:

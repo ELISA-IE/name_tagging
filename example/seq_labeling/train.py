@@ -2,11 +2,11 @@ import os
 import subprocess
 
 
-train = 'data/eng.train.bio'
-dev = 'data/eng.testa.bio'
-test = 'data/eng.testb.bio'
+train = '../data/eng.train.bio'
+dev = '../data/eng.testa.bio'
+test = '../data/eng.testb.bio'
 
-model_dir = 'model/'
+model_dir = '../model/'
 
 # use word2vec to generate pre-trained embeddings.
 # tutorial: https://code.google.com/archive/p/word2vec/
@@ -31,8 +31,8 @@ cmd = [
     '--lower', '0',
     '--zeros', '1',
     '--char_dim', '25',
-    '--char_lstm_dim', '25',
-    '--char_conv_channel', '25',
+    '--char_lstm_dim', '0',
+    '--char_conv', '25',
     '--word_dim', '100',
     '--word_lstm_dim', '100',
     '--pre_emb', pre_emb,
@@ -52,6 +52,9 @@ os.environ.update({'OMP_NUM_THREADS': '1'})
 # set which gpu to use if gpu option is turned on
 gpu_device = '0'
 os.environ.update({'CUDA_VISIBLE_DEVICES': gpu_device})
+# get the project path. can be replaced by hard coded path.
+python_path = os.path.abspath(__file__).replace('example/seq_labeling/train.py', '')
+os.environ.update({'PYTHONPATH': python_path})
 
 print(' '.join(cmd))
 subprocess.call(cmd, env=os.environ)

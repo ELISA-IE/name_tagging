@@ -5,6 +5,7 @@ import time
 import random
 import torch
 import itertools
+import pickle
 import numpy as np
 import torch.optim as optim
 from collections import OrderedDict
@@ -17,7 +18,7 @@ from dnn_pytorch.seq_labeling.loader import augment_with_pretrained
 
 from dnn_pytorch.span_labeling.nn import SpanLabeling
 from dnn_pytorch.span_labeling.loader import prepare_dataset, span_tag_mapping, entity_mapping, augment_with_entity_pretrained
-from dnn_pytorch.span_labeling.utils import create_input, process_preds, evaluate_linking
+from dnn_pytorch.span_labeling.utils import create_input, process_preds, process_all_O_pred, evaluate_linking
 from dnn_pytorch.dnn_utils import exp_lr_scheduler
 
 
@@ -344,37 +345,49 @@ for epoch in range(num_epochs):
         for i in range(0, len(dataset[phase]), batch_size):
             inputs = create_input(dataset[phase][i:i+batch_size], parameters)
 
-            # forward
-            ner_prob, linking_prob, loss, tagging_loss, linking_loss = model.forward(inputs)
+            if inputs['spans'] is not None:
+                # forward
+                ner_prob, linking_prob, loss, tagging_loss, linking_loss = model.forward(
+                    inputs)
 
-            # backward + optimize only if in training phase
-            if phase == 'train':
-                epoch_loss.append(loss.data[0])
-                epoch_tagging_loss.append(tagging_loss.data[0])
-                epoch_linking_loss.append(linking_loss.data[0])
+                # backward + optimize only if in training phase
+                if phase == 'train':
+                    epoch_loss.append(loss.data[0])
+                    epoch_tagging_loss.append(tagging_loss.data[0])
+                    epoch_linking_loss.append(linking_loss.data[0])
 
-                # zero the parameter gradients
-                optimizer.zero_grad()
+                    # zero the parameter gradients
+                    optimizer.zero_grad()
 
-                loss.backward()
+                    loss.backward()
 
-                # `clip_grad_norm` helps prevent the exploding gradient problem
-                # in RNNs / LSTMs.
-                torch.nn.utils.clip_grad_norm(model.parameters(), 5)
+                    # `clip_grad_norm` helps prevent the exploding gradient problem
+                    # in RNNs / LSTMs.
+                    torch.nn.utils.clip_grad_norm(model.parameters(), 5)
 
-                optimizer.step()
+                    optimizer.step()
 
-                sys.stdout.write(
-                    '%d instances processed. current batch loss: %.4f (tagging loss: %.4f, linking loss: %.4f)\r' %
-                    (i, np.mean(epoch_loss), np.mean(epoch_tagging_loss), np.mean(epoch_linking_loss))
-                )
-                sys.stdout.flush()
+                    sys.stdout.write(
+                        '%d instances processed. current batch loss: %.4f (tagging loss: %.4f, linking loss: %.4f)\r' %
+                        (i, np.mean(epoch_loss), np.mean(epoch_tagging_loss),
+                         np.mean(epoch_linking_loss))
+                    )
+                    sys.stdout.flush()
+                else:
+                    seq_index_mapping = inputs['seq_index_mapping']
+
+                    raw_ner_preds, raw_linking_preds = process_preds(
+                        ner_prob, linking_prob, inputs, id_to_span_tag,
+                        tag_to_id, entity_to_id
+                    )
+                    ner_preds += [raw_ner_preds[seq_index_mapping[j]]
+                                  for j in range(len(seq_index_mapping))]
+
+                    linking_preds += [raw_linking_preds[seq_index_mapping[j]]
+                                      for j in range(len(seq_index_mapping))]
+            # if no span generated from the sentences, make ner pred to O and linking pred to NIL. (this happens when running on perfection mentions)
             else:
-                seq_index_mapping = inputs['seq_index_mapping']
-
-                raw_ner_preds, raw_linking_preds = process_preds(
-                    ner_prob, linking_prob, inputs, id_to_span_tag, tag_to_id, entity_to_id
-                )
+                raw_ner_preds, raw_linking_preds = process_all_O_pred(inputs, tag_to_id, entity_to_id)
                 ner_preds += [raw_ner_preds[seq_index_mapping[j]]
                               for j in range(len(seq_index_mapping))]
 
@@ -386,7 +399,7 @@ for epoch in range(num_epochs):
             print('{} Loss: {:.4f}\n'.format(phase, epoch_loss))
         else:
             # evaluate tagging
-            epoch_f1, epoch_acc, predicted_bio = evaluate(ner_preds, dataset[phase], id_to_tag)
+            epoch_f1, epoch_acc, predicted_bio = evaluate(parameters, ner_preds, dataset[phase], id_to_tag)
             if metric == 'f1':
                 epoch_score = epoch_f1
             elif metric == 'acc':

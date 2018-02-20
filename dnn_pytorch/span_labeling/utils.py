@@ -42,8 +42,8 @@ def create_input(data, parameters, add_label=True):
         data[reversed_seq_index_mapping[i]]['span_tag']
         for i in range(len(data))
         ]
-    sorted_span_entity_tag = [
-        data[reversed_seq_index_mapping[i]]['span_entity_tag']
+    sorted_span_gold_candidate = [
+        data[reversed_seq_index_mapping[i]]['span_gold_candidate']
         for i in range(len(data))
         ]
     sorted_span_candidates = [
@@ -51,33 +51,22 @@ def create_input(data, parameters, add_label=True):
         for i in range(len(data))
         ]
 
-    batch_spans = [
-        [span for j, span in enumerate(seq)]
-        for i, seq in enumerate(sorted_span_index)
-        ]
-    batch_spans = list(itertools.chain.from_iterable(batch_spans))
+    batch_spans = list(itertools.chain.from_iterable(sorted_span_index))
+    # if all sentences in the batch don't have gold mention, return spans as None.
+    if not batch_spans:
+        inputs['spans'] = None
+        return inputs
+
     batch_span_len = [len(s) for s in batch_spans]
     # pad spans
     max_span_len = max(batch_span_len)
     padded_batch_spans = [list(s) + [0]*(max_span_len-len(s)) for s in batch_spans]
 
-    batch_tags = [
-        [sorted_span_tag[i][j] for j, span in enumerate(seq)]
-        for i, seq in enumerate(sorted_span_index)
-        ]
-    batch_tags = list(itertools.chain.from_iterable(batch_tags))
+    batch_tags = list(itertools.chain.from_iterable(sorted_span_tag))
 
-    batch_entity_tags = [
-        [sorted_span_entity_tag[i][j] for j, span in enumerate(seq)]
-        for i, seq in enumerate(sorted_span_index)
-        ]
-    batch_entity_tags = list(itertools.chain.from_iterable(batch_entity_tags))
+    batch_gold_candidates = list(itertools.chain.from_iterable(sorted_span_gold_candidate))
 
-    batch_candidates = [
-        [span for j, span in enumerate(seq)]
-        for i, seq in enumerate(sorted_span_candidates)
-        ]
-    batch_candidates = list(itertools.chain.from_iterable(batch_candidates))
+    batch_candidates = list(itertools.chain.from_iterable(sorted_span_candidates))
     batch_candidate_len = [len(s) for s in batch_candidates]
     # pad candidates
     max_candidate_len = max(batch_candidate_len)
@@ -95,7 +84,7 @@ def create_input(data, parameters, add_label=True):
     inputs['span_len'] = np.array(batch_span_len)
     inputs['span_tags'] = np.array(batch_tags)
     inputs['span_pos'] = np.array(span_position)
-    inputs['span_entity_tags'] = np.array(batch_entity_tags)
+    inputs['span_gold_candidates'] = np.array(batch_gold_candidates)
     inputs['span_candidates'] = np.array(padded_batch_candidates)
     inputs['span_candidate_len'] = np.array(batch_candidate_len)
 
@@ -176,8 +165,19 @@ def process_preds(ner_prob, linking_prob, inputs, id_to_span_tag, tag_to_id, ent
             [p[k][0] if k in p else tag_to_id['O'] for k in range(seq_len[j])]
         )
         linking_pred_rtn.append(
-            [p[k][1] if k in p else entity_to_id['<NIL>'] for k in range(seq_len[j])]
+            [p[k][1] if k in p else entity_to_id['<O>'] for k in range(seq_len[j])]
         )
+
+    return ner_pred_rtn, linking_pred_rtn
+
+
+def process_all_O_pred(inputs, tag_to_id, entity_to_id):
+    ner_pred_rtn = []
+    linking_pred_rtn = []
+    seq_len = inputs['seq_len']
+    for j in range(len(seq_len)):
+        ner_pred_rtn.append([tag_to_id['O']] * seq_len[j])
+        linking_pred_rtn.append([entity_to_id['<O>']] * seq_len[j])
 
     return ner_pred_rtn, linking_pred_rtn
 
@@ -187,16 +187,16 @@ def evaluate_linking(preds, dataset):
     num_correct_pred = 0
     for i, sentence in enumerate(dataset):
         span_index = sentence['span_index']
-        span_entity_tag = sentence['span_entity_tag']
+        span_gold_candidate = sentence['span_gold_candidate']
         span_candidates = sentence['span_candidates']
         span_tag = sentence['span_tag']
         linkable_mtn = []
         for j, index in enumerate(span_index):
             if span_tag[j] != 0:
                 # only evaluate non-nil entities
-                if span_entity_tag[j] == 0:
+                if span_candidates[j][span_gold_candidate[j]] == 0:
                     continue
-                entity_index = span_candidates[j][span_entity_tag[j]]
+                entity_index = span_candidates[j][span_gold_candidate[j]]
                 linkable_mtn.append((index, entity_index))
                 num_perfect_mtn += 1
 

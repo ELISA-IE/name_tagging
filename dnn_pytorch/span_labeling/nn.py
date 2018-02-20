@@ -119,26 +119,30 @@ class SpanLabeling(nn.Module):
         #
         # linear layer before loss
         #
-        # the added 1 dimension is linking entity probability feature
-        self.linear = nn.Linear(3 * word_lstm_dim + entity_dim + 1, label_size)
+        if entity_dim:
+            # the added 1 dimension is linking entity probability feature
+            self.linear = nn.Linear(3 * word_lstm_dim + entity_dim + 1, label_size)
+        else:
+            self.linear = nn.Linear(3 * word_lstm_dim, label_size)
+
+        if entity_dim:
+            #
+            # entity embeddings
+            #
+            self.entity_emb = nn.Embedding(entity_vocab_size, entity_dim)
+
+            #
+            # linking parameters
+            #
+            self.span_projection = nn.Linear(3 * word_lstm_dim, entity_dim)
+            self.similarity_layer = nn.Linear((2 * entity_dim) + 1, 1)
+            self.linking_loss = CrossEntropyLoss()
 
         #
         # loss
         #
         self.softmax = nn.Softmax()
         self.tagging_loss = BalancedCrossEntropyLoss(label_weights)
-
-        #
-        # entity embeddings
-        #
-        self.entity_emb = nn.Embedding(entity_vocab_size, entity_dim)
-
-        #
-        # linking parameters
-        #
-        self.span_projection = nn.Linear(3 * word_lstm_dim, entity_dim)
-        self.similarity_layer = nn.Linear((2 * entity_dim) + 1, 1)
-        self.linking_loss = CrossEntropyLoss()
 
         #
         # initialize weights of each layer
@@ -168,12 +172,11 @@ class SpanLabeling(nn.Module):
 
         init_param(self.linear)
 
-        # linking
-        init_param(self.entity_emb)
-
-        init_param(self.span_projection)
-
-        init_param(self.similarity_layer)
+        if self.model_param['entity_dim']:
+            # linking
+            init_param(self.entity_emb)
+            init_param(self.span_projection)
+            init_param(self.similarity_layer)
 
     def load_pretrained(self, id_to_word, pre_emb, word_dim, **kwargs):
         if not pre_emb:
@@ -419,81 +422,88 @@ class SpanLabeling(nn.Module):
         #
         # linking model
         #
-        linking_loss = 0
-        linking_prob = None
+        linking_loss = Variable(torch.zeros(1)).type(FloatTensor)
+        # default linking prob
+        all_span_linking_prob = torch.zeros(spans.size()[0], int(max(inputs['span_candidate_len'])))
+        all_span_linking_prob[:, 0] = 1
         if self.model_param['entity_dim']:
-            span_entity_tags = Variable(
-                torch.from_numpy(inputs['span_entity_tags'])).type(LongTensor)
+            span_gold_candidates = Variable(
+                torch.from_numpy(inputs['span_gold_candidates'])).type(LongTensor)
             span_candidates = Variable(
                 torch.from_numpy(inputs['span_candidates'])).type(LongTensor)
             span_candidate_len = inputs['span_candidate_len']
 
-            # only process spans that have entity candidates
-            span_index_to_process = Variable(
-                torch.from_numpy(
-                    np.array(
-                        [i for i, l in enumerate(span_candidate_len) if l != 0])
-                )
-            ).type(LongTensor)
-            spans_to_process = attentive_span_repr[span_index_to_process]
-            candidates_to_process = span_candidates[span_index_to_process]
-            candidate_len_to_process = span_candidate_len[
-                span_index_to_process.data.cpu().numpy()]
-            entity_tags_to_process = span_entity_tags[span_index_to_process]
+            # only process spans that have entity candidates for efficiency
+            span_index_to_process = [i for i, c in enumerate(inputs['span_candidates']) if c[0] != 0]
 
-            projectes_spans = nn.Tanh()(self.span_projection(spans_to_process))
-
-            num_candidates = span_candidates.size()[1]
-            expanded_projectes_spans = torch.unsqueeze(projectes_spans,
-                                                       1).expand(
-                projectes_spans.size()[0], num_candidates,
-                projectes_spans.size()[1])
-
-            candidates_repr = self.entity_emb(candidates_to_process)
-            dot_product = torch.sum(expanded_projectes_spans * candidates_repr,
-                                    dim=2)
-            v = torch.cat([expanded_projectes_spans, candidates_repr,
-                           dot_product.unsqueeze(2)], dim=2)
-
-            sim_value = torch.squeeze(self.similarity_layer(v))
-
-            # spans have various number of candidates. mask is used to compute loss
-            # correctly
-            zero_one_mask = Variable(
-                FloatTensor(sequence_mask(candidate_len_to_process.data)))
-            mask = (zero_one_mask - 1) * 1000
-            masked_sim_value = sim_value + mask
-
-            linking_prob = self.softmax(masked_sim_value)
-
-            if self.training:
-                linking_loss = self.linking_loss(linking_prob, entity_tags_to_process) / spans_to_process.size(0)
-
-            all_span_linking_prob = torch.zeros(spans.size()[0], linking_prob.size()[1])
+            all_span_linking_prob = torch.zeros(spans.size()[0], int(max(inputs['span_candidate_len'])))
             all_span_linking_prob[:, 0] = 1
 
-            for i in range(span_index_to_process.size()[0]):
-                all_span_linking_prob[span_index_to_process[i].data.cpu().numpy()[0]] = linking_prob[i].data
+            if len(span_index_to_process) > 0:
+                span_index_to_process_var = Variable(
+                    torch.from_numpy(np.array(span_index_to_process))
+                ).type(LongTensor)
+                spans_to_process = attentive_span_repr[span_index_to_process_var]
+                candidates_to_process = span_candidates[span_index_to_process_var]
+                candidate_len_to_process = span_candidate_len[
+                    span_index_to_process_var.data.cpu().numpy()]
+                gold_candidates_to_process = span_gold_candidates[span_index_to_process_var]
+
+                projected_spans = nn.Tanh()(self.span_projection(spans_to_process))
+
+                num_candidates = span_candidates.size()[1]
+                expanded_projected_spans = torch.unsqueeze(projected_spans,
+                                                           1).expand(
+                    projected_spans.size()[0], num_candidates,
+                    projected_spans.size()[1])
+
+                candidates_repr = self.entity_emb(candidates_to_process)
+                dot_product = torch.sum(expanded_projected_spans * candidates_repr,
+                                        dim=2)
+                v = torch.cat([expanded_projected_spans, candidates_repr,
+                               dot_product.unsqueeze(2)], dim=2)
+
+                sim_value = torch.squeeze(self.similarity_layer(v))
+
+                # spans have various number of candidates. mask is used to compute loss
+                # correctly
+                zero_one_mask = Variable(
+                    FloatTensor(sequence_mask(candidate_len_to_process.data,
+                                              max_len=max(inputs['span_candidate_len']))))
+                mask = (zero_one_mask - 1) * 1000
+                masked_sim_value = sim_value + mask
+                linking_prob = self.softmax(masked_sim_value)
+
+                if self.training:
+                    linking_loss = self.linking_loss(linking_prob, gold_candidates_to_process) / spans_to_process.size(0)
+
+                for i in range(span_index_to_process_var.size()[0]):
+                    all_span_linking_prob[span_index_to_process_var[i].data.cpu().numpy()[0]] = linking_prob[i].data
 
         #
         # tagging model
         #
-        # add top 1 linking result to span representations
-        _, linking_pred = torch.max(linking_prob, dim=1)
-        linked_entity_repr = candidates_repr[torch.from_numpy(np.arange(candidates_repr.size()[0])).type(LongTensor), linking_pred.data]
+        final_span_repr = attentive_span_repr
+        if self.model_param['entity_dim']:
+            # add top 1 linking result to span representations
+            all_span_linking_repr = [self.entity_emb(Variable(LongTensor([0]))).squeeze(0)] * attentive_span_repr.size()[0]
+            if span_index_to_process:
+                _, linking_pred = torch.max(linking_prob, dim=1)
+                linked_entity_repr = candidates_repr[torch.from_numpy(np.arange(candidates_repr.size()[0])).type(LongTensor), linking_pred.data]
 
-        all_span_linking_repr = [self.entity_emb(Variable(LongTensor([0]))).squeeze(0)] * attentive_span_repr.size()[0]
-        for i in range(span_index_to_process.size()[0]):
-            all_span_linking_repr[span_index_to_process[i].data.cpu().numpy()[0]] = linked_entity_repr[i]
-        all_span_linking_repr = torch.stack(all_span_linking_repr)
+                for i in range(span_index_to_process_var.size()[0]):
+                    all_span_linking_repr[span_index_to_process_var[i].data.cpu().numpy()[0]] = linked_entity_repr[i]
 
-        final_span_repr = torch.cat([attentive_span_repr, all_span_linking_repr], dim=1)
+            all_span_linking_repr = torch.stack(all_span_linking_repr)
 
-        # add top 1 linking result probability as feature
-        span_linking_prob = Variable(torch.zeros(final_span_repr.size()[0], 1)).type(FloatTensor)
-        for i in range(span_index_to_process.size()[0]):
-            span_linking_prob[span_index_to_process[i].data.cpu().numpy()[0]] = linking_prob[i][linking_pred[i]]
-        final_span_repr = torch.cat([final_span_repr, span_linking_prob], dim=1)
+            final_span_repr = torch.cat([final_span_repr, all_span_linking_repr], dim=1)
+
+            # add top 1 linking result probability as feature
+            span_linking_prob = Variable(torch.zeros(final_span_repr.size()[0], 1)).type(FloatTensor)
+            if span_index_to_process:
+                for i in range(span_index_to_process_var.size()[0]):
+                    span_linking_prob[span_index_to_process_var[i].data.cpu().numpy()[0]] = linking_prob[i][linking_pred[i]]
+            final_span_repr = torch.cat([final_span_repr, span_linking_prob], dim=1)
 
         # fully connected layer
         linear_out = self.linear(final_span_repr)

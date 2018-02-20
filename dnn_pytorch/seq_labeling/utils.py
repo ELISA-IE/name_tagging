@@ -228,7 +228,7 @@ def create_input(data, parameters, add_label=True):
     return inputs
 
 
-def evaluate(preds, dataset, id_to_tag, eval_out_dir=None):
+def evaluate(parameters, preds, dataset, id_to_tag, eval_out_dir=None):
     """
     Evaluate current model using CoNLL script.
     """
@@ -240,6 +240,9 @@ def evaluate(preds, dataset, id_to_tag, eval_out_dir=None):
         assert len(d['words']) == len(p)
         p_tags = [id_to_tag[y_pred] for y_pred in p]
         r_tags = [id_to_tag[y_real] for y_real in d['tags']]
+        if parameters['tag_scheme'] == 'iobes':
+            p_tags = iobes_iob(p_tags)
+            r_tags = iobes_iob(r_tags)
         for i, (y_pred, y_real) in enumerate(zip(p, d['tags'])):
             new_line = " ".join([d['str_words'][i]] + [r_tags[i], p_tags[i]])
             predictions.append(new_line)

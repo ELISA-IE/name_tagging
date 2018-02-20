@@ -77,11 +77,13 @@ f_output = open(args.output, 'w')
 # Iterate over data.
 print('tagging...')
 for i in range(0, len(eval_dataset), batch_size):
-    inputs, seq_index_mapping, char_index_mapping, seq_len, char_len = \
-        create_input(eval_dataset[i:i+batch_size], parameters, add_label=False)
+    inputs = create_input(eval_dataset[i:i+batch_size], parameters, add_label=False)
 
     # forward
-    outputs, loss = model.forward(inputs, seq_len, char_len, char_index_mapping)
+    outputs, loss = model.forward(inputs)
+
+    seq_index_mapping = inputs['seq_index_mapping']
+    seq_len = inputs['seq_len']
     if parameters['crf']:
         preds = [outputs[seq_index_mapping[j]].data
                  for j in range(len(outputs))]

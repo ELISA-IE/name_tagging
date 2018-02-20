@@ -349,7 +349,7 @@ for epoch in range(num_epochs):
             epoch_loss = sum(epoch_loss) / len(epoch_loss)
             print('{} Loss: {:.4f}\n'.format(phase, epoch_loss))
         else:
-            epoch_f1, epoch_acc, predicted_bio = evaluate(preds, dataset[phase], id_to_tag)
+            epoch_f1, epoch_acc, predicted_bio = evaluate(parameters, preds, dataset[phase], id_to_tag)
             if metric == 'f1':
                 epoch_score = epoch_f1
             elif metric == 'acc':
