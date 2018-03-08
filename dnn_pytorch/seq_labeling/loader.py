@@ -157,7 +157,7 @@ def prepare_sentence(sentence, feat_column,
     Prepare a sentence for evaluation.
     """
     def f(x): return x.lower() if lower else x
-    max_sent_len = 200
+    max_sent_len = 1000
     max_word_len = 30
     if is_train:
         sentence = sentence[:max_sent_len]
@@ -184,15 +184,16 @@ def prepare_sentence(sentence, feat_column,
 
     # features
     sent_feats = []
-    for token in sentence:
-        s_feats = []
-        for j, feat in enumerate(token[feat_column:-1]):
-            if feat not in feat_to_id_list[j]:
-                s_feats.append(feat_to_id_list[j]['<UNK>'])
-            else:
-                s_feats.append(feat_to_id_list[j][feat])
-        if s_feats:
-            sent_feats.append(s_feats)
+    if feat_to_id_list:
+        for token in sentence:
+            s_feats = []
+            for j, feat in enumerate(token[feat_column:-1]):
+                if feat not in feat_to_id_list[j]:
+                    s_feats.append(feat_to_id_list[j]['<UNK>'])
+                else:
+                    s_feats.append(feat_to_id_list[j][feat])
+            if s_feats:
+                sent_feats.append(s_feats)
 
     return {
         'str_words': str_words,

@@ -11,7 +11,7 @@ from collections import OrderedDict
 
 from dnn_pytorch.seq_labeling.nn import SeqLabeling
 from dnn_pytorch.seq_labeling.utils import create_input, Tee
-from dnn_pytorch.seq_labeling.utils import evaluate, eval_script
+from dnn_pytorch.seq_labeling.utils import evaluate_ner, eval_script
 from dnn_pytorch.seq_labeling.loader import word_mapping, char_mapping, tag_mapping, feats_mapping
 from dnn_pytorch.seq_labeling.loader import update_tag_scheme, prepare_dataset, load_sentences
 from dnn_pytorch.seq_labeling.loader import augment_with_pretrained
@@ -81,12 +81,12 @@ parser.add_argument(
     type=int, help="Capitalization feature dimension (0 to disable)"
 )
 parser.add_argument(
-    "--feat_dim", default="5",
+    "--feat_dim", default="0",
     type=int, help="dimension for each feature."
 )
 parser.add_argument(
     '--feat_column',
-    type=int, default=1,
+    type=int, default=0,
     help='the number of the column where features start. default is 1, '
          'the 2nd column.'
 )
@@ -224,10 +224,13 @@ else:
 # Create a dictionary and a mapping for words / POS tags / tags
 dico_chars, char_to_id, id_to_char = char_mapping(train_sentences)
 dico_tags, tag_to_id, id_to_tag = tag_mapping(train_sentences)
-# create a dictionary and a mapping for each feature
-dico_feats_list, feat_to_id_list, id_to_feat_list = feats_mapping(
-    train_sentences, parameters['feat_column']
-)
+if parameters['feat_dim']:
+    # create a dictionary and a mapping for each feature
+    dico_feats_list, feat_to_id_list, id_to_feat_list = feats_mapping(
+        train_sentences, parameters['feat_column']
+    )
+else:
+    dico_feats_list, feat_to_id_list, id_to_feat_list = [], [], []
 
 parameters['label_size'] = len(id_to_tag)
 parameters['word_vocab_size'] = len(id_to_word)
@@ -272,6 +275,8 @@ else:
 # initialize optimizer function
 if lr_method_name == 'sgd':
     optimizer_ft = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+elif lr_method_name == 'adagrad':
+    optimizer_ft = optim.Adagrad(model.parameters(), lr=0.01)
 else:
     print('unknown optimization method.')
 
@@ -290,11 +295,13 @@ for epoch in range(num_epochs):
 
     # Each epoch has a training and validation phase
     for phase in ['train', 'dev', 'test']:
+        batches = [dataset[phase][i:i + batch_size] for i in
+                   range(0, len(dataset[phase]), batch_size)]
         if phase == 'train':
             optimizer = exp_lr_scheduler(optimizer_ft, epoch,
                                          **lr_method_parameters)
             model.train(True)  # Set model to training mode
-            random.shuffle(dataset[phase])
+            random.shuffle(batches)
         else:
             model.train(False)  # Set model to evaluate mode
 
@@ -302,19 +309,18 @@ for epoch in range(num_epochs):
 
         # Iterate over data.
         preds = []
-        for i in range(0, len(dataset[phase]), batch_size):
-            inputs = create_input(dataset[phase][i:i+batch_size], parameters)
+        num_instances = 0
+        for batch in batches:
+            inputs = create_input(batch, parameters)
+            num_instances += len(batch)
 
             # forward
             outputs, loss = model.forward(inputs)
 
-            try:
-                epoch_loss.append(loss.data[0])
-            except AttributeError:
-                pass
-
             # backward + optimize only if in training phase
             if phase == 'train':
+                epoch_loss.append(loss.data[0])
+
                 # zero the parameter gradients
                 optimizer.zero_grad()
 
@@ -328,7 +334,7 @@ for epoch in range(num_epochs):
 
                 sys.stdout.write(
                     '%d instances processed. current batch loss: %f\r' %
-                    (i, np.mean(epoch_loss))
+                    (num_instances, np.mean(epoch_loss))
                 )
                 sys.stdout.flush()
             else:
@@ -349,7 +355,7 @@ for epoch in range(num_epochs):
             epoch_loss = sum(epoch_loss) / len(epoch_loss)
             print('{} Loss: {:.4f}\n'.format(phase, epoch_loss))
         else:
-            epoch_f1, epoch_acc, predicted_bio = evaluate(parameters, preds, dataset[phase], id_to_tag)
+            epoch_f1, epoch_acc, predicted_bio = evaluate_ner(parameters, preds, dataset[phase], id_to_tag)
             if metric == 'f1':
                 epoch_score = epoch_f1
             elif metric == 'acc':

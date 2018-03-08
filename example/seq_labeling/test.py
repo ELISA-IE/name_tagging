@@ -3,7 +3,7 @@ import os
 
 
 dnn_tagger_script = '../../dnn_pytorch/seq_labeling/tag.py'
-model_dir = '../model/tag_scheme=iobes,zeros=True,char_dim=25,char_conv=25,word_dim=100,word_lstm_dim=100,feat_dim=5,feat_column=1,crf=True,dropout=0.5,lr_method=sgd-init_lr=.005-lr_decay_epoch=100,num_epochs=100/best_model.pth.tar'
+model_dir = '../model/tag_scheme=iobes,zeros=True,char_dim=25,char_conv=25,word_dim=100,word_lstm_dim=100,crf=True,dropout=0.5,lr_method=sgd-init_lr=.005-lr_decay_epoch=100,num_epochs=100/best_model.pth.tar'
 
 input_file = '../data/eng.testb.bio'
 output_file = '../result/eng.testb.ner.bio'

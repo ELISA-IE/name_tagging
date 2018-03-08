@@ -228,7 +228,7 @@ def create_input(data, parameters, add_label=True):
     return inputs
 
 
-def evaluate(parameters, preds, dataset, id_to_tag, eval_out_dir=None):
+def evaluate_ner(parameters, preds, dataset, id_to_tag, eval_out_dir=None):
     """
     Evaluate current model using CoNLL script.
     """
