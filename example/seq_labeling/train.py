@@ -11,7 +11,6 @@ model_dir = '../model/'
 # use word2vec to generate pre-trained embeddings.
 # tutorial: https://code.google.com/archive/p/word2vec/
 pre_emb = ''
-# pre_emb = '/nas/data/m1/zhangb8/ml/data/embeddings/lample_pretrained/eng.Skip100'
 
 #
 # run command

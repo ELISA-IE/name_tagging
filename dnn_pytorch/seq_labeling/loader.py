@@ -6,7 +6,7 @@ try:
     import lzma
 except ImportError:
     pass
-
+import gzip
 from dnn_pytorch.seq_labeling.utils import create_dico, create_mapping, zero_digits
 from dnn_pytorch.seq_labeling.utils import iob2, iob_iobes
 
@@ -274,5 +274,7 @@ def augment_with_pretrained(dictionary, ext_emb_path, words):
 def load_embedding(pre_emb):
     if os.path.basename(pre_emb).endswith('.xz'):
         return lzma.open(pre_emb)
+    if os.path.basename(pre_emb).endswith('.gz'):
+        return gzip.open(pre_emb, 'rb')
     else:
         return codecs.open(pre_emb, 'r', 'utf-8', errors='replace')
