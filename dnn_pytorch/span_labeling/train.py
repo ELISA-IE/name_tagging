@@ -11,14 +11,14 @@ import torch.optim as optim
 from collections import OrderedDict
 
 from dnn_pytorch.seq_labeling.utils import Tee
-from dnn_pytorch.seq_labeling.utils import evaluate, eval_script
+from dnn_pytorch.seq_labeling.utils import eval_script
 from dnn_pytorch.seq_labeling.loader import word_mapping, char_mapping, feats_mapping, tag_mapping
 from dnn_pytorch.seq_labeling.loader import update_tag_scheme, load_sentences
 from dnn_pytorch.seq_labeling.loader import augment_with_pretrained
 
 from dnn_pytorch.span_labeling.nn import SpanLabeling
-from dnn_pytorch.span_labeling.loader import prepare_dataset, span_tag_mapping, entity_mapping, augment_with_entity_pretrained
-from dnn_pytorch.span_labeling.utils import create_input, process_preds, process_all_O_pred, evaluate_linking
+from dnn_pytorch.span_labeling.loader import prepare_dataset, span_tag_mapping, entity_mapping, etype_mapping, augment_with_entity_pretrained, load_spans
+from dnn_pytorch.span_labeling.utils import create_input, process_preds, process_all_o_pred, evaluate_edl
 from dnn_pytorch.dnn_utils import exp_lr_scheduler
 
 
@@ -93,12 +93,12 @@ parser.add_argument(
     type=int, help="Capitalization feature dimension (0 to disable)"
 )
 parser.add_argument(
-    "--feat_dim", default="5",
+    "--feat_dim", default="0",
     type=int, help="dimension for each feature."
 )
 parser.add_argument(
     '--feat_column',
-    type=int, default=1,
+    type=int, default=0,
     help='the number of the column where features start. default is 1, '
          'the 2nd column.'
 )
@@ -201,19 +201,37 @@ lower = parameters['lower']
 zeros = parameters['zeros']
 tag_scheme = parameters['tag_scheme']
 
-# Load sentences
+# Load sentences from raw data
 train_sentences = load_sentences(args.train, lower, zeros)
 dev_sentences = load_sentences(args.dev, lower, zeros)
 test_sentences = load_sentences(args.test, lower, zeros)
 
-# train_sentences = train_sentences[:500]
-# dev_sentences = dev_sentences[:500]
-# test_sentences = test_sentences[:500]
+train_sentences = train_sentences[:200]
+dev_sentences = dev_sentences[:200]
+test_sentences = test_sentences[:200]
 
 # Use selected tagging scheme (IOB / IOBES), also check tagging scheme
 update_tag_scheme(train_sentences, tag_scheme)
 update_tag_scheme(dev_sentences, tag_scheme)
 update_tag_scheme(test_sentences, tag_scheme)
+
+# generate spans from sequence.
+train_span_pkl = '/nas/data/m1/zhangb8/ml/pytorch/dnn_pytorch/runs/coling18/pickled_cache/edl_train_span.pkl'
+dev_span_pkl = '/nas/data/m1/zhangb8/ml/pytorch/dnn_pytorch/runs/coling18/pickled_cache/edl_dev_span.pkl'
+test_span_pkl = '/nas/data/m1/zhangb8/ml/pytorch/dnn_pytorch/runs/coling18/pickled_cache/edl_test_span.pkl'
+
+train_spans = load_spans(train_sentences, tag_scheme)
+dev_spans = load_spans(dev_sentences, tag_scheme)
+test_spans = load_spans(test_sentences, tag_scheme)
+# pickle dump the spans to disk for debugging.
+# pickle.dump(train_spans, open(train_span_pkl, 'wb'))
+# pickle.dump(train_spans, open(dev_span_pkl, 'wb'))
+# pickle.dump(train_spans, open(test_span_pkl, 'wb'))
+
+# pickle load saved spans
+# train_spans = pickle.load(open(train_span_pkl, 'rb'))
+# dev_spans = pickle.load(open(dev_span_pkl, 'rb'))
+# test_spans = pickle.load(open(test_span_pkl, 'rb'))
 
 # Create a dictionary / mapping of words
 # If we use pretrained embeddings, we add them to the dictionary.
@@ -238,17 +256,26 @@ if parameters['entity_emb']:
         dico_entity, parameters['entity_emb']
     )
 else:
-    dico_entity, entity_to_id, id_to_entity = entity_mapping(train_sentences+dev_sentences+test_sentences)
+    dico_entity, entity_to_id, id_to_entity = entity_mapping(
+        train_sentences + dev_sentences + test_sentences
+    )
 
 # Create a dictionary and a mapping for chars / tags / span tags / features / entity
 dico_chars, char_to_id, id_to_char = char_mapping(train_sentences)
-dico_tags, tag_to_id, id_to_tag = tag_mapping(train_sentences)
-dico_span_tags, span_tag_to_id, id_to_span_tag = span_tag_mapping(train_sentences)
-# create a dictionary and a mapping for each feature
-dico_feats_list, feat_to_id_list, id_to_feat_list = feats_mapping(
-    train_sentences, parameters['feat_column']
-)
+dico_tags, tag_to_id, id_to_tag = tag_mapping(train_sentences+dev_sentences+test_sentences)
 
+if parameters['feat_dim']:
+    # create a dictionary and a mapping for each feature
+    dico_feats_list, feat_to_id_list, id_to_feat_list = feats_mapping(
+        train_sentences, parameters['feat_column']
+    )
+else:
+    dico_feats_list, feat_to_id_list, id_to_feat_list = [], [], []
+
+dico_span_tags, span_tag_to_id, id_to_span_tag = span_tag_mapping(train_spans+dev_spans+test_spans)
+dico_etype, etype_to_id, id_to_etype = etype_mapping(train_spans)
+
+# save mapping stats to parameters
 parameters['label_size'] = len(id_to_span_tag)
 parameters['label_weights'] = [
     sum(dico_span_tags.values()) / dico_span_tags[id_to_span_tag[i]]
@@ -258,29 +285,30 @@ parameters['word_vocab_size'] = len(id_to_word)
 parameters['entity_vocab_size'] = len(id_to_entity)
 parameters['char_vocab_size'] = len(id_to_char)
 parameters['feat_vocab_size'] = [len(item) for item in id_to_feat_list]
+parameters['etype_vocab_size'] = len(id_to_etype)
 
 # Index data
 dataset = dict()
 print('Preparing train dataset...')
 dataset['train'] = prepare_dataset(
-    train_sentences, parameters['feat_column'],
+    train_sentences, train_spans, parameters['feat_column'],
     word_to_id, char_to_id, tag_to_id, span_tag_to_id, feat_to_id_list,
-    entity_to_id, lower,
-    tag_scheme=tag_scheme
+    entity_to_id, etype_to_id,
+    lower
 )
 print('Preparing dev dataset...')
 dataset['dev'] = prepare_dataset(
-    dev_sentences, parameters['feat_column'],
+    dev_sentences, dev_spans, parameters['feat_column'],
     word_to_id, char_to_id, tag_to_id, span_tag_to_id, feat_to_id_list,
-    entity_to_id, lower,
-    tag_scheme=tag_scheme
+    entity_to_id, etype_to_id,
+    lower
 )
 print('Preparing test dataset...')
 dataset['test'] = prepare_dataset(
-    test_sentences, parameters['feat_column'],
+    test_sentences, test_spans, parameters['feat_column'],
     word_to_id, char_to_id, tag_to_id, span_tag_to_id, feat_to_id_list,
-    entity_to_id, lower,
-    tag_scheme=tag_scheme
+    entity_to_id, etype_to_id,
+    lower
 )
 
 print("%i / %i / %i sentences in train / dev / test." % (
@@ -316,7 +344,7 @@ since = time.time()
 best_model = model
 best_dev = 0.0
 best_test = 0.0
-metric = 'f1'  # use metric 'f1' or 'acc'
+metric = 'f1'  # use metric 'f1' or 'acc' when saving best model
 num_epochs = args.num_epochs
 batch_size = args.batch_size
 
@@ -327,11 +355,12 @@ for epoch in range(num_epochs):
 
     # Each epoch has a training and validation phase
     for phase in ['train', 'dev', 'test'][:]:
+        batches = [dataset[phase][i:i+batch_size] for i in range(0, len(dataset[phase]), batch_size)]
         if phase == 'train':
             optimizer = exp_lr_scheduler(optimizer_ft, epoch,
                                          **lr_method_parameters)
             model.train(True)  # Set model to training mode
-            random.shuffle(dataset[phase])
+            random.shuffle(batches)
         else:
             model.train(False)  # Set model to evaluate mode
 
@@ -342,13 +371,14 @@ for epoch in range(num_epochs):
         # Iterate over data.
         ner_preds = []
         linking_preds = []
-        for i in range(0, len(dataset[phase]), batch_size):
-            inputs = create_input(dataset[phase][i:i+batch_size], parameters)
+        num_instances = 0
+        for batch in batches:
+            inputs = create_input(batch, parameters)
+            num_instances += len(batch)
 
-            if inputs['spans'] is not None:
+            if len(inputs['spans']) > 0:
                 # forward
-                ner_prob, linking_prob, loss, tagging_loss, linking_loss = model.forward(
-                    inputs)
+                ner_prob, linking_prob, loss, tagging_loss, linking_loss = model.forward(inputs)
 
                 # backward + optimize only if in training phase
                 if phase == 'train':
@@ -369,8 +399,8 @@ for epoch in range(num_epochs):
 
                     sys.stdout.write(
                         '%d instances processed. current batch loss: %.4f (tagging loss: %.4f, linking loss: %.4f)\r' %
-                        (i, np.mean(epoch_loss), np.mean(epoch_tagging_loss),
-                         np.mean(epoch_linking_loss))
+                        (num_instances, np.mean(epoch_loss),
+                         np.mean(epoch_tagging_loss), np.mean(epoch_linking_loss))
                     )
                     sys.stdout.flush()
                 else:
@@ -385,9 +415,12 @@ for epoch in range(num_epochs):
 
                     linking_preds += [raw_linking_preds[seq_index_mapping[j]]
                                       for j in range(len(seq_index_mapping))]
-            # if no span generated from the sentences, make ner pred to O and linking pred to NIL. (this happens when running on perfection mentions)
+            # if no span generated from the sentences, make ner pred to O and
+            # linking pred to NIL. (this happens when running on perfection
+            # mention spans)
             else:
-                raw_ner_preds, raw_linking_preds = process_all_O_pred(inputs, tag_to_id, entity_to_id)
+                seq_index_mapping = inputs['seq_index_mapping']
+                raw_ner_preds, raw_linking_preds = process_all_o_pred(inputs, tag_to_id, entity_to_id)
                 ner_preds += [raw_ner_preds[seq_index_mapping[j]]
                               for j in range(len(seq_index_mapping))]
 
@@ -398,26 +431,15 @@ for epoch in range(num_epochs):
             epoch_loss = sum(epoch_loss) / len(epoch_loss)
             print('{} Loss: {:.4f}\n'.format(phase, epoch_loss))
         else:
-            # evaluate tagging
-            epoch_f1, epoch_acc, predicted_bio = evaluate(parameters, ner_preds, dataset[phase], id_to_tag)
-            if metric == 'f1':
-                epoch_score = epoch_f1
-            elif metric == 'acc':
-                epoch_score = epoch_acc
-            print(
-                '{} F1: {:.4f} Acc: {:.4f}\n'.format(phase, epoch_f1, epoch_acc)
+            # evaluate EDL results
+            metric_score, predicted_bio = evaluate_edl(
+                ner_preds, linking_preds,
+                metric, parameters, dataset, phase, id_to_tag, id_to_entity
             )
 
-            # evaluate linking
-            num_perfect_mtn, num_correct_pred, acc = evaluate_linking(linking_preds, dataset[phase])
-            print('=> linking results:')
-            print('%d perfect mentions are in the dataset.' % num_perfect_mtn)
-            print('%d mentions are linked correctly.' % num_correct_pred)
-            print('linking accuracy: %.4f' % (num_correct_pred / num_perfect_mtn))
-
         # deep copy the model
-        if phase == 'dev' and epoch_score > best_dev:
-            best_dev = epoch_score
+        if phase == 'dev' and metric_score > best_dev:
+            best_dev = metric_score
             print('new best score on dev: %.4f' % best_dev)
             print('saving the current model to disk...')
 
@@ -440,8 +462,8 @@ for epoch in range(num_epochs):
             with open(os.path.join(model_dir, 'best_dev.ner.bio'), 'w') as f:
                 f.write(predicted_bio)
 
-        if phase == 'test' and epoch_score > best_test:
-            best_test = epoch_score
+        if phase == 'test' and metric_score > best_test:
+            best_test = metric_score
             print('new best score on test: %.4f' % best_test)
             with open(os.path.join(model_dir, 'best_test.ner.bio'), 'w') as f:
                 f.write(predicted_bio)

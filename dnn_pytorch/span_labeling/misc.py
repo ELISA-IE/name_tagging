@@ -11,11 +11,11 @@ def compute_linking_candidate_coverage(bio_linking_file):
     num_nil = 0
     top_n_candidate = 50
     for m in mentions:
-        query = ' '.join([item[0] for item in m])
+        query = ' '.join([item[0] for item in m]).lower()
 
         # skip NIL mention
         kb_id = m[0][1]
-        if kb_id == "NIL" or kb_id.startswith('NIL'):
+        if kb_id == "<NIL>" or kb_id.startswith('NIL'):
             num_nil += 1
             continue
 

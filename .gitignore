@@ -2,10 +2,10 @@
 **/.DS_Store
 
 # ignore modules
-dnn_pytorch/tmp
 dnn_pytorch/misc
 dnn_pytorch/runs
 dnn_pytorch/seq_to_seq
+dnn_pytorch/span_labeling.bk
 #dnn_pytorch/span_labeling
 
 # ignore examples
